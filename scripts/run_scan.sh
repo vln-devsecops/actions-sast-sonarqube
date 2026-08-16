@@ -35,6 +35,17 @@ echo "Using scanner image: ${SCANNER_IMAGE}"
 
 rm -rf "${ABS_PROJECT_BASE_DIR}/.scannerwork"
 
+# The scanner image runs as a baked-in non-root user (uid 1000) by default,
+# and its home directory (/opt/sonar-scanner/.sonar, where it caches
+# downloads) is owned by that uid. We override --user to match the host's
+# checkout owner so the bind-mounted PROJECT_BASE_DIR is writable - but that
+# means uid 1000's own home directory usually *isn't* writable by whichever
+# uid we end up running as (e.g. GitHub Actions' non-root `runner` user).
+# Give the scanner a dedicated, host-created (so correctly-owned) cache dir
+# instead of letting it fall back to the image's built-in one.
+SCANNER_CACHE_DIR="$(mktemp -d)"
+trap 'rm -rf "${SCANNER_CACHE_DIR}"' EXIT
+
 echo "Scanning ${ABS_PROJECT_BASE_DIR} as project '${PROJECT_KEY}'..."
 docker run --rm \
   --network host \
@@ -42,7 +53,9 @@ docker run --rm \
   -e SONAR_HOST_URL="${SONAR_HOST_URL}" \
   -e SONAR_TOKEN="${SONAR_TOKEN}" \
   -e HOME=/tmp \
+  -e SONAR_USER_HOME=/tmp/sonar-cache \
   -v "${ABS_PROJECT_BASE_DIR}:/usr/src" \
+  -v "${SCANNER_CACHE_DIR}:/tmp/sonar-cache" \
   -w /usr/src \
   "${SCANNER_IMAGE}" \
   -Dsonar.projectKey="${PROJECT_KEY}" \

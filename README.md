@@ -194,7 +194,7 @@ docker compose -f docker-compose.ephemeral.yml down -v
 ## Things found by actually running this stack, not just reading it
 
 This repo's own smoke test (bring the compose stack up, bootstrap, scan
-`fixtures/`, fetch, diff) surfaced three real issues that a read-through
+`fixtures/`, fetch, diff) surfaced four real issues that a read-through
 wouldn't have caught, all fixed in the current scripts:
 
 - The bundled Elasticsearch also enforces a `nofile` (max file descriptors)
@@ -207,11 +207,20 @@ wouldn't have caught, all fixed in the current scripts:
   8.x) defaults `sonar.working.directory` to a path outside the mounted
   project directory (`/tmp/.scannerwork` in the container), so
   `report-task.txt` never reached the host. `run_scan.sh` now pins
-  `sonar.working.directory` under the mounted project dir explicitly. Also
-  added `--user "$(id -u):$(id -g)"` to the scanner's `docker run`, since the
-  image's default non-root user can't write into a bind-mounted directory
-  owned by the host's checkout user (this would have broken on real GitHub
-  Actions runners too, not just locally).
+  `sonar.working.directory` under the mounted project dir explicitly.
+- The scanner image's default non-root user can't write into a bind-mounted
+  directory owned by the host's checkout user, so `run_scan.sh` adds
+  `--user "$(id -u):$(id -g)"`. That in turn broke the image's *own* baked-in
+  cache dir (`/opt/sonar-scanner/.sonar/cache`, owned by the image's uid 1000)
+  once the container is running as some other uid - this only surfaced on the
+  real GitHub Actions runner (`runner`, uid 1001), because my first local
+  smoke test ran everything as root, and root bypasses Unix permission
+  checks entirely, silently masking the bug. Re-ran the smoke test as a
+  genuine non-root user afterward to confirm the fix and catch anything else
+  root had been hiding: `run_scan.sh` now redirects the cache to a
+  host-created, correctly-owned directory via `SONAR_USER_HOME` /
+  `-v ...:/tmp/sonar-cache`, mounted separately from the project directory
+  so cache files never end up in what gets scanned.
 
 With those fixes, a full local run against `fixtures/` (fresh instance,
 pristine baseline scan vs. a modified "head" copy with one shifted-but-
