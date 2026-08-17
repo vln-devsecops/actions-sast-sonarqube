@@ -5,7 +5,8 @@ the findings present in head but not in baseline ("new findings").
 Matching rule (see README for rationale): two findings are the same issue if
 they share (ruleKey, componentPath, hash) - or, when a finding's `hash` is
 empty (SonarQube returns no hash for some issue types, e.g. cross-file
-duplication), if they share (ruleKey, componentPath, line) instead. `hash` is
+duplication, and never returns one for Security Hotspots), if they share
+(ruleKey, componentPath, line) instead. `hash` is
 a checksum of the source line's content at issue-creation time, so it
 survives unrelated line-number churn elsewhere in the file; we're applying it
 across two independent analyses instead of across one analysis's history, the

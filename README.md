@@ -74,8 +74,9 @@ so `scripts/find_baseline_artifact.py` calls the REST API directly
 
 Two findings across independent analyses are the same issue if they share
 `(ruleKey, componentPath, hash)` - or, when `hash` is empty (SonarQube
-returns no hash for some issue types, e.g. cross-file duplication),
-`(ruleKey, componentPath, line)` instead. `hash` is a checksum of the source
+returns no hash for some issue types, e.g. cross-file duplication, and never
+returns one for Security Hotspots), `(ruleKey, componentPath, line)`
+instead. `hash` is a checksum of the source
 line's content at issue-creation time - it's what SonarQube's own
 issue-tracking engine uses internally to survive line-number churn; this
 action applies it across two independent analyses instead of across one
@@ -104,10 +105,14 @@ positional equivalent of `impacts[].severity: MEDIUM` on the newer 5-level
 scale, if that mapping matters later. `impacts[]` is still carried in the
 findings JSON for context.
 
-**Note**: only SonarQube *Issues* (bugs, code smells, vulnerabilities) are
-covered - the API used (`api/issues/search`) does not return *Security
-Hotspots*, which SonarQube tracks and reviews separately. Tracked as a gap
-to close, not an accepted limitation: [#2](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/2).
+Both SonarQube *Issues* (bugs, code smells, vulnerabilities - `api/issues/search`)
+and *Security Hotspots* (`api/hotspots/search`, only those still `TO_REVIEW`)
+are covered, folded into the same findings schema and tagged with a `type`
+field (see `scripts/fetch_findings.py`). Hotspots have no `severity` of
+their own - their `vulnerabilityProbability` (`HIGH`/`MEDIUM`/`LOW`) is
+mapped onto the same severity scale issues use (`HIGH`→`CRITICAL`,
+`MEDIUM`→`MAJOR`, `LOW`→`MINOR`, a judgment call with no canonical mapping
+to fall back on) so the same threshold applies to both.
 
 ## Using this action from another repo
 
