@@ -42,7 +42,7 @@ def severity_at_least(severity, threshold):
     return SEVERITY_ORDER.index(severity) >= SEVERITY_ORDER.index(threshold)
 
 
-def gh_api(method, url, token, body=None):
+def gh_api(method, url, token, body=None):  # pragma: no cover - network I/O, validated live
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {token}")
@@ -106,7 +106,7 @@ def batch(items, size):
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def create_check_run(repo, token, sha, check_name, conclusion, summary, annotations):
+def create_check_run(repo, token, sha, check_name, conclusion, summary, annotations):  # pragma: no cover - network I/O, validated live
     owner, name = repo.split("/", 1)
     base_url = f"https://api.github.com/repos/{owner}/{name}/check-runs"
 
@@ -141,7 +141,7 @@ def create_check_run(repo, token, sha, check_name, conclusion, summary, annotati
     return check_run
 
 
-def main():
+def main():  # pragma: no cover - CLI glue over the above, validated live
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--findings", required=True, help="Path to new-findings JSON (diff_findings.py output)")
     parser.add_argument("--threshold", default="MAJOR", choices=SEVERITY_ORDER)

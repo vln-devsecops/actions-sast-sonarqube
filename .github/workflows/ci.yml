@@ -24,7 +24,14 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Run unit tests
-        run: python3 -m pytest tests/ -v
+        run: python3 -m pytest tests/ -v --cov=scripts --cov-report=xml:coverage.xml --cov-report=term-missing
+
+      - name: Validate coverage
+        uses: vln-devsecops/actions-validate-coverage@v1
+        with:
+          coverage-file: coverage.xml
+          coverage-type: cobertura
+          minimum-coverage: "95"
 
       - name: ShellCheck
         uses: ludeeus/action-shellcheck@2.0.0

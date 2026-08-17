@@ -1,4 +1,6 @@
-from diff_findings import diff, filter_by_changed_files, finding_key
+import json
+
+from diff_findings import diff, filter_by_changed_files, finding_key, main
 
 
 def make_finding(rule="python:S1", path="a.py", hash="h1", line=10, **extra):
@@ -75,3 +77,55 @@ def test_filter_by_changed_files_drops_everything_on_path_space_mismatch():
     findings = [make_finding(path="python/app.py")]
     result = filter_by_changed_files(findings, {"fixtures/python/app.py"})
     assert result == []
+
+
+def test_main_writes_new_findings_to_out_file(tmp_path, monkeypatch, capsys):
+    baseline_path = tmp_path / "baseline.json"
+    head_path = tmp_path / "head.json"
+    out_path = tmp_path / "new.json"
+
+    baseline_path.write_text(json.dumps([make_finding(hash="h1")]))
+    head_path.write_text(
+        json.dumps([make_finding(hash="h1"), make_finding(rule="python:S2", hash="h2")])
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["diff_findings.py", "--baseline", str(baseline_path), "--head", str(head_path), "--out", str(out_path)],
+    )
+    main()
+
+    result = json.loads(out_path.read_text())
+    assert len(result) == 1
+    assert result[0]["rule"] == "python:S2"
+
+    captured = capsys.readouterr()
+    assert "1 new finding(s) out of 2 head finding(s)" in captured.out
+
+
+def test_main_applies_changed_files_filter_end_to_end(tmp_path, monkeypatch):
+    baseline_path = tmp_path / "baseline.json"
+    head_path = tmp_path / "head.json"
+    out_path = tmp_path / "new.json"
+    changed_files_path = tmp_path / "changed-files.txt"
+
+    baseline_path.write_text(json.dumps([]))
+    head_path.write_text(
+        json.dumps([make_finding(path="python/app.py"), make_finding(path="js/app.js")])
+    )
+    changed_files_path.write_text("python/app.py\n")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "diff_findings.py",
+            "--baseline", str(baseline_path),
+            "--head", str(head_path),
+            "--out", str(out_path),
+            "--changed-files", str(changed_files_path),
+        ],
+    )
+    main()
+
+    result = json.loads(out_path.read_text())
+    assert [f["path"] for f in result] == ["python/app.py"]

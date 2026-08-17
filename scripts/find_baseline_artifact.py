@@ -22,7 +22,7 @@ import urllib.request
 import zipfile
 
 
-def gh_api_get(url, token):
+def gh_api_get(url, token):  # pragma: no cover - network I/O, validated live
     req = urllib.request.Request(url)
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Accept", "application/vnd.github+json")
@@ -47,7 +47,7 @@ def select_artifact(artifacts, name):
     return candidates[0]
 
 
-def find_artifact(owner, repo, name, token):
+def find_artifact(owner, repo, name, token):  # pragma: no cover - network I/O, validated live
     url = (
         f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
         f"?name={urllib.parse.quote(name)}&per_page=100"
@@ -69,7 +69,7 @@ class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
         return new_req
 
 
-def download_and_extract(artifact, token, dest_dir):
+def download_and_extract(artifact, token, dest_dir):  # pragma: no cover - network I/O, validated live
     req = urllib.request.Request(artifact["archive_download_url"])
     req.add_header("Authorization", f"Bearer {token}")
     opener = urllib.request.build_opener(_StripAuthOnRedirect)
@@ -80,7 +80,7 @@ def download_and_extract(artifact, token, dest_dir):
         zf.extractall(dest_dir)
 
 
-def main():
+def main():  # pragma: no cover - CLI glue over the above, validated live
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="owner/repo")
     parser.add_argument("--name", required=True, help="exact artifact name to look up")
