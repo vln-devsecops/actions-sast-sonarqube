@@ -168,17 +168,27 @@ the code they affect - see `docker-compose.ephemeral.yml`'s `ulimits` block,
 `bootstrap_sonarqube.sh`'s password generator, and `run_scan.sh`'s
 `sonar.working.directory` / `SONAR_USER_HOME` handling.
 
-The full pipeline (scan → fetch → diff → policy) has been exercised twice:
-once locally against a fresh ephemeral instance (`fixtures/` baseline vs. a
-modified "head" copy - hash-based matching correctly excluded
-shifted-but-unchanged findings and surfaced the one genuinely new one), and
-once for real in this repo's own PR #1, which exercised the fallback
-baseline-resolution path (no artifact existed yet for a first-ever PR) and
-the blocking-job-failure path (fixtures/ itself trips 5 findings, 4 of them
-MAJOR-or-above) end-to-end on a GitHub-hosted runner.
+The pure-logic functions in each script (`scripts/*.py`) have a pytest suite
+(`tests/`), gated on 95% coverage via `vln-devsecops/actions-validate-coverage`
+in `ci.yml`. Network/CLI glue is deliberately excluded from that gate and
+validated live instead, the same way the rest of the pipeline is.
 
-Not yet exercised against a real PR: tier a/b artifact-based baseline
-resolution, which needs a prior push to a baseline branch first.
+The full pipeline (scan → fetch → diff → policy) has been exercised against
+real PRs twice, beyond the local ephemeral-instance run (`fixtures/` baseline
+vs. a modified "head" copy - hash-based matching correctly excluded
+shifted-but-unchanged findings and surfaced the one genuinely new one):
+
+- PR #1 exercised the fallback baseline-resolution path (no artifact existed
+  yet for a first-ever PR) and the blocking-job-failure path (`fixtures/`
+  itself trips 5 findings, 4 of them MAJOR-or-above).
+- PR #4 exercised tier a artifact-based baseline resolution end-to-end, once
+  a baseline artifact from PR #1's merge existed to resolve against. That run
+  caught a real bug on first exercise: the artifact download's redirect to
+  blob storage rejected a forwarded GitHub `Authorization` header with a 401.
+
+Not yet exercised against a real PR: tier b artifact-based baseline
+resolution specifically (needs the merge-base artifact to be missing or
+expired while the target branch's current-HEAD artifact still exists).
 
 Artifact retention defaults to 90 days (`artifact-retention-days` input on
 `sonar-baseline.yml`) - no reason surfaced to deviate from that.
