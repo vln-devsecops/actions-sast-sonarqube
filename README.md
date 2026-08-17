@@ -106,9 +106,9 @@ scale, if that mapping matters later. `impacts[]` is still carried in the
 findings JSON for context.
 
 Both SonarQube *Issues* (bugs, code smells, vulnerabilities - `api/issues/search`)
-and *Security Hotspots* (`api/hotspots/search`, only those still `TO_REVIEW`)
-are covered, folded into the same findings schema and tagged with a `type`
-field (see `scripts/fetch_findings.py`). Hotspots have no `severity` of
+and *Security Hotspots* (`api/hotspots/search`) are covered, folded into the
+same findings schema and tagged with a `type` field (see
+`scripts/fetch_findings.py`). Hotspots have no `severity` of
 their own - their `vulnerabilityProbability` (`HIGH`/`MEDIUM`/`LOW`) is
 mapped onto the same severity scale issues use (`HIGH`→`CRITICAL`,
 `MEDIUM`→`MAJOR`, `LOW`→`MINOR`, a judgment call with no canonical mapping
