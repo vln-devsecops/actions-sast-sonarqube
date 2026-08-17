@@ -149,6 +149,13 @@ jobs:
 `@main` above is a placeholder: once this repo adopts release-please (or
 equivalent) tagging, pin consumers to a version tag (e.g. `@v1`) instead.
 
+**Fork PRs**: GitHub downgrades `GITHUB_TOKEN` to read-only for a
+`pull_request` event from a fork, regardless of the `permissions:` block
+above. `sonar-pr.yml` still runs the full scan and diff, and still blocks
+the job on policy the same as any other PR - it just can't publish the
+Check Run or PR comment, since both need write access it doesn't have.
+Findings are reported in the job's step summary instead in that case.
+
 ## Testing
 
 ```sh
