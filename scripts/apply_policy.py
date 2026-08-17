@@ -7,9 +7,10 @@ The policy is our own, evaluated purely against the new-findings set produced
 by diff_findings.py - not SonarQube's Quality Gate, which assumes persisted
 server-side baseline/period state this action deliberately doesn't keep.
 
-Always writes --result-out, even when it goes on to exit non-zero, so a
-subsequent workflow step (e.g. posting a PR summary comment) can read the
-outcome with `if: always()`.
+Always writes --result-out, even when it goes on to exit non-zero, and even
+when publishing the Check Run itself fails (e.g. a fork PR's read-only
+GITHUB_TOKEN), so a subsequent workflow step (e.g. posting a PR summary
+comment) can read the outcome with `if: always()`.
 """
 import argparse
 import json
@@ -117,6 +118,12 @@ def build_summary(findings, blocking_findings, threshold, blocking_enabled):
     return "\n".join(lines)
 
 
+def write_result(path, result):
+    with open(path, "w") as f:
+        json.dump(result, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+
 def batch(items, size):
     """Split items into consecutive chunks of at most `size`. GitHub's Check
     Run API only accepts ANNOTATION_BATCH_SIZE annotations per request, so
@@ -192,10 +199,6 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
     summary = build_summary(findings, blocking_findings, args.threshold, blocking_enabled)
     annotations = [to_annotation(f) for f in findings]
 
-    check_run = create_check_run(
-        args.repo, token, args.sha, args.check_name, conclusion, summary, annotations
-    )
-
     result = {
         "threshold": args.threshold,
         "blocking_enabled": blocking_enabled,
@@ -203,11 +206,23 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
         "blocking_findings": len(blocking_findings),
         "by_severity": counts_by_severity(findings),
         "blocked": blocked,
-        "check_run_url": check_run.get("html_url"),
+        "check_run_url": None,
     }
-    with open(args.result_out, "w") as f:
-        json.dump(result, f, indent=2, sort_keys=True)
-        f.write("\n")
+
+    # Write the result before publishing the Check Run, then refresh it with
+    # the run's URL. The `Post PR summary comment` step reads this file under
+    # `if: always()`, so it has to exist even when check-run publication fails
+    # (e.g. the read-only GITHUB_TOKEN a fork PR gets) - otherwise that step
+    # dies with a FileNotFoundError that masks the real error.
+    write_result(args.result_out, result)
+
+    try:
+        check_run = create_check_run(
+            args.repo, token, args.sha, args.check_name, conclusion, summary, annotations
+        )
+        result["check_run_url"] = check_run.get("html_url")
+    finally:
+        write_result(args.result_out, result)
 
     print(summary)
 
