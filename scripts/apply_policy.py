@@ -209,13 +209,12 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
         "check_run_url": None,
     }
 
-    # Write the result before publishing the Check Run, then refresh it with
-    # the run's URL. The `Post PR summary comment` step reads this file under
-    # `if: always()`, so it has to exist even when check-run publication fails
-    # (e.g. the read-only GITHUB_TOKEN a fork PR gets) - otherwise that step
-    # dies with a FileNotFoundError that masks the real error.
-    write_result(args.result_out, result)
-
+    # `finally` runs whether create_check_run() succeeds or raises, so this
+    # alone guarantees --result-out is written either way - the `Post PR
+    # summary comment` step reads this file under `if: always()`, so it has
+    # to exist even when check-run publication fails (e.g. the read-only
+    # GITHUB_TOKEN a fork PR gets), rather than dying with a
+    # FileNotFoundError that masks the real error.
     try:
         check_run = create_check_run(
             args.repo, token, args.sha, args.check_name, conclusion, summary, annotations
