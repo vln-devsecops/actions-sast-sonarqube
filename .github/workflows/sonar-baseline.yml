@@ -61,27 +61,27 @@ jobs:
         with:
           repository: ${{ steps.action-source.outputs.repo }}
           ref: ${{ steps.action-source.outputs.ref }}
-          path: .sonarqube-community-action
+          path: .sast-sonarqube
 
       - name: Raise vm.max_map_count for Elasticsearch
         run: sudo sysctl -w vm.max_map_count=262144
 
       - name: Start ephemeral SonarQube stack
-        run: docker compose -f .sonarqube-community-action/docker-compose.ephemeral.yml up -d
+        run: docker compose -f .sast-sonarqube/docker-compose.ephemeral.yml up -d
 
       - name: Wait for SonarQube to be ready
-        run: .sonarqube-community-action/scripts/wait_for_sonarqube.sh http://localhost:9000
+        run: .sast-sonarqube/scripts/wait_for_sonarqube.sh http://localhost:9000
 
       - name: Bootstrap admin token
         id: bootstrap
         run: |
-          token="$(.sonarqube-community-action/scripts/bootstrap_sonarqube.sh http://localhost:9000 gha-baseline)"
+          token="$(.sast-sonarqube/scripts/bootstrap_sonarqube.sh http://localhost:9000 gha-baseline)"
           echo "::add-mask::${token}"
           echo "token=${token}" >> "$GITHUB_OUTPUT"
 
       - name: Run scan
         id: scan
-        uses: ./.sonarqube-community-action
+        uses: ./.sast-sonarqube
         with:
           sonar-host-url: http://localhost:9000
           sonar-token: ${{ steps.bootstrap.outputs.token }}
@@ -97,4 +97,4 @@ jobs:
 
       - name: Tear down ephemeral SonarQube stack
         if: always()
-        run: docker compose -f .sonarqube-community-action/docker-compose.ephemeral.yml down -v
+        run: docker compose -f .sast-sonarqube/docker-compose.ephemeral.yml down -v

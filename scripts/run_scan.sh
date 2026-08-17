@@ -61,6 +61,10 @@ docker run --rm \
   -Dsonar.projectKey="${PROJECT_KEY}" \
   -Dsonar.projectBaseDir=/usr/src \
   -Dsonar.working.directory=/usr/src/.scannerwork
+  # ^ The current SonarScanner Engine (sonar-scanner-cli 12.x / engine 8.x)
+  #   defaults this to /tmp/.scannerwork inside the container - not a path
+  #   under projectBaseDir - so report-task.txt (read back from the host
+  #   below) would never reach the bind mount without this override.
 
 report_task_file="${ABS_PROJECT_BASE_DIR}/.scannerwork/report-task.txt"
 if [[ ! -f "$report_task_file" ]]; then

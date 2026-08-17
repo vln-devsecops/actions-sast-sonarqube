@@ -1,4 +1,4 @@
-name: SonarQube Community Scan
+name: SAST SonarQube
 description: >-
   Run a single SonarQube Community Build scan against a checked-out project
   and return a normalized, tool-agnostic findings JSON file. Assumes a
@@ -34,6 +34,11 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+
     - name: Run SonarQube scan
       id: scan
       shell: bash

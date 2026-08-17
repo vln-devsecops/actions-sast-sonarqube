@@ -86,7 +86,12 @@ jobs:
         with:
           repository: ${{ steps.action-source.outputs.repo }}
           ref: ${{ steps.action-source.outputs.ref }}
-          path: .sonarqube-community-action
+          path: .sast-sonarqube
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
 
       - name: "Look up baseline artifact (tier a: PR branch-off point)"
         id: tier-a
@@ -95,7 +100,7 @@ jobs:
           REPO: ${{ github.repository }}
           ARTIFACT_NAME: sonar-baseline-${{ steps.refs.outputs.merge-base }}
         run: |
-          found="$(python3 .sonarqube-community-action/scripts/find_baseline_artifact.py \
+          found="$(python3 .sast-sonarqube/scripts/find_baseline_artifact.py \
             --repo "$REPO" --name "$ARTIFACT_NAME" --dest .baseline-artifact)"
           echo "found=${found}" >> "$GITHUB_OUTPUT"
 
@@ -107,7 +112,7 @@ jobs:
           REPO: ${{ github.repository }}
           ARTIFACT_NAME: sonar-baseline-${{ steps.refs.outputs.target-head-sha }}
         run: |
-          found="$(python3 .sonarqube-community-action/scripts/find_baseline_artifact.py \
+          found="$(python3 .sast-sonarqube/scripts/find_baseline_artifact.py \
             --repo "$REPO" --name "$ARTIFACT_NAME" --dest .baseline-artifact)"
           echo "found=${found}" >> "$GITHUB_OUTPUT"
 
@@ -139,22 +144,22 @@ jobs:
         run: sudo sysctl -w vm.max_map_count=262144
 
       - name: Start ephemeral SonarQube stack
-        run: docker compose -f .sonarqube-community-action/docker-compose.ephemeral.yml up -d
+        run: docker compose -f .sast-sonarqube/docker-compose.ephemeral.yml up -d
 
       - name: Wait for SonarQube to be ready
-        run: .sonarqube-community-action/scripts/wait_for_sonarqube.sh http://localhost:9000
+        run: .sast-sonarqube/scripts/wait_for_sonarqube.sh http://localhost:9000
 
       - name: Bootstrap admin token
         id: bootstrap
         run: |
-          token="$(.sonarqube-community-action/scripts/bootstrap_sonarqube.sh http://localhost:9000 gha-pr)"
+          token="$(.sast-sonarqube/scripts/bootstrap_sonarqube.sh http://localhost:9000 gha-pr)"
           echo "::add-mask::${token}"
           echo "token=${token}" >> "$GITHUB_OUTPUT"
 
       - name: Scan target branch HEAD (fallback path only)
         id: fallback-base-scan
         if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
-        uses: ./.sonarqube-community-action
+        uses: ./.sast-sonarqube
         with:
           sonar-host-url: http://localhost:9000
           sonar-token: ${{ steps.bootstrap.outputs.token }}
@@ -163,7 +168,7 @@ jobs:
 
       - name: Scan PR head
         id: head-scan
-        uses: ./.sonarqube-community-action
+        uses: ./.sast-sonarqube
         with:
           sonar-host-url: http://localhost:9000
           sonar-token: ${{ steps.bootstrap.outputs.token }}
@@ -187,7 +192,7 @@ jobs:
       - name: Diff findings
         id: diff
         run: |
-          python3 .sonarqube-community-action/scripts/diff_findings.py \
+          python3 .sast-sonarqube/scripts/diff_findings.py \
             --baseline "${{ steps.baseline-findings.outputs.path }}" \
             --head "${{ steps.head-scan.outputs.findings-json }}" \
             --changed-files changed-files.txt \
@@ -201,7 +206,7 @@ jobs:
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          python3 .sonarqube-community-action/scripts/apply_policy.py \
+          python3 .sast-sonarqube/scripts/apply_policy.py \
             --findings "${{ steps.diff.outputs.new-findings }}" \
             --threshold "${{ inputs.severity-threshold }}" \
             --blocking "${{ inputs.blocking }}" \
@@ -217,7 +222,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          python3 .sonarqube-community-action/scripts/post_pr_comment.py \
+          python3 .sast-sonarqube/scripts/post_pr_comment.py \
             --repo "$REPO" \
             --pr-number "$PR_NUMBER" \
             --result policy-result.json \
@@ -225,4 +230,4 @@ jobs:
 
       - name: Tear down ephemeral SonarQube stack
         if: always()
-        run: docker compose -f .sonarqube-community-action/docker-compose.ephemeral.yml down -v
+        run: docker compose -f .sast-sonarqube/docker-compose.ephemeral.yml down -v

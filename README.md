@@ -112,7 +112,8 @@ findings JSON for context.
 
 **Note**: only SonarQube *Issues* (bugs, code smells, vulnerabilities) are
 covered - the API used (`api/issues/search`) does not return *Security
-Hotspots*, which SonarQube tracks and reviews separately.
+Hotspots*, which SonarQube tracks and reviews separately. Tracked as a gap
+to close, not an accepted limitation: [#2](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/2).
 
 ## Using this action from another repo
 
@@ -146,6 +147,9 @@ jobs:
       actions: read
 ```
 
+`@main` above is a placeholder: once this repo adopts release-please (or
+equivalent) tagging, pin consumers to a version tag (e.g. `@v1`) instead.
+
 If this action's repo is private, the consumer repo needs read access to it:
 **Settings → Actions → General → Access** on this repo, "Accessible from
 repositories in the `vln-devsecops` organization" (or equivalent) - both
@@ -172,77 +176,31 @@ docker compose -f docker-compose.ephemeral.yml down -v
 
 ## Deviations from the original spec
 
-- **`scripts/bootstrap_sonarqube.sh`** (not in the original script list):
-  SonarQube refuses most API calls from the built-in `admin` account until
-  its default password has been changed, so something has to rotate it and
-  mint a token before `action.yml` can authenticate. Kept as its own script
-  rather than folded into `wait_for_sonarqube.sh` (which only waits) or
-  `run_scan.sh` (which assumes a token already exists, per spec).
-- **`scripts/find_baseline_artifact.py`** and **`scripts/post_pr_comment.py`**
-  (not in the original script list): the spec calls out the need for both
-  (cross-run artifact lookup via the REST API; create-or-update PR comment
-  via a hidden marker) without naming a script for them.
-- **sonar-scanner-cli's pinned version lives in `docker-compose.ephemeral.yml`**,
-  as an inert `scanner`-profile service (`entrypoint: ["true"]`, never
-  started by `docker compose up -d`'s default profile) rather than hardcoded
-  in `scripts/run_scan.sh`. Dependabot's `docker` ecosystem only scans
-  Dockerfiles/compose files, not arbitrary shell scripts, so this is what
-  makes scanner-cli bumps arrive as reviewable PRs like the other two images.
-  `run_scan.sh` reads the pinned tag back out of the compose file at run time
-  (`docker compose config --images --profile scanner`) so it's declared once.
+**`scripts/find_baseline_artifact.py`** and **`scripts/post_pr_comment.py`**
+(not in the original script list): the spec calls out the need for both
+(cross-run artifact lookup via the REST API; create-or-update PR comment
+via a hidden marker) without naming a script for them.
 
-## Things found by actually running this stack, not just reading it
+## Validation status
 
-This repo's own smoke test (bring the compose stack up, bootstrap, scan
-`fixtures/`, fetch, diff) surfaced four real issues that a read-through
-wouldn't have caught, all fixed in the current scripts:
+Rationale for specific implementation choices (the ones that only surfaced by
+actually running the stack, not just reading it) lives as comments next to
+the code they affect - see `docker-compose.ephemeral.yml`'s `ulimits` block,
+`bootstrap_sonarqube.sh`'s password generator, and `run_scan.sh`'s
+`sonar.working.directory` / `SONAR_USER_HOME` handling.
 
-- The bundled Elasticsearch also enforces a `nofile` (max file descriptors)
-  bootstrap check separate from `vm.max_map_count` - `docker-compose.ephemeral.yml`
-  now sets `ulimits.nofile` to 65536 on the `sonarqube` service.
-- SonarQube's default admin password policy requires a special character;
-  `secrets.token_urlsafe()`'s alphabet doesn't have one. `bootstrap_sonarqube.sh`
-  now builds a password guaranteed to contain upper/lower/digit/special.
-- The current scanner engine (sonar-scanner-cli 12.x / SonarScanner Engine
-  8.x) defaults `sonar.working.directory` to a path outside the mounted
-  project directory (`/tmp/.scannerwork` in the container), so
-  `report-task.txt` never reached the host. `run_scan.sh` now pins
-  `sonar.working.directory` under the mounted project dir explicitly.
-- The scanner image's default non-root user can't write into a bind-mounted
-  directory owned by the host's checkout user, so `run_scan.sh` adds
-  `--user "$(id -u):$(id -g)"`. That in turn broke the image's *own* baked-in
-  cache dir (`/opt/sonar-scanner/.sonar/cache`, owned by the image's uid 1000)
-  once the container is running as some other uid - this only surfaced on the
-  real GitHub Actions runner (`runner`, uid 1001), because my first local
-  smoke test ran everything as root, and root bypasses Unix permission
-  checks entirely, silently masking the bug. Re-ran the smoke test as a
-  genuine non-root user afterward to confirm the fix and catch anything else
-  root had been hiding: `run_scan.sh` now redirects the cache to a
-  host-created, correctly-owned directory via `SONAR_USER_HOME` /
-  `-v ...:/tmp/sonar-cache`, mounted separately from the project directory
-  so cache files never end up in what gets scanned.
+The full pipeline (scan → fetch → diff → policy) has been exercised twice:
+once locally against a fresh ephemeral instance (`fixtures/` baseline vs. a
+modified "head" copy - hash-based matching correctly excluded
+shifted-but-unchanged findings and surfaced the one genuinely new one), and
+once for real in this repo's own PR #1, which exercised the fallback
+baseline-resolution path end-to-end on a GitHub-hosted runner (no artifact
+existed yet for a first-ever PR).
 
-With those fixes, a full local run against `fixtures/` (fresh instance,
-pristine baseline scan vs. a modified "head" copy with one shifted-but-
-unchanged finding set and one genuinely new finding) produced exactly the
-expected diff: the shifted findings were correctly matched via `hash` and
-excluded, and the one new finding was correctly surfaced.
+Not yet exercised against a real PR: tier a/b artifact-based baseline
+resolution (needs a prior push to a baseline branch first) and the
+blocking-job-failure path (needs a PR that actually introduces a
+MAJOR-or-above finding).
 
-## What wasn't (and couldn't be) validated end-to-end here
-
-The scripts above were validated against a real, locally-run ephemeral
-SonarQube instance. The GitHub-API-dependent pieces
-(`find_baseline_artifact.py`, `apply_policy.py`'s Check Run creation,
-`post_pr_comment.py`) were validated by unit-level exercise of their pure
-logic (severity ordering, annotation shaping, comment rendering) plus code
-review, not against the real GitHub API, since that needs a real repo/PR
-context. The tier-b and fallback baseline-resolution paths, and the
-end-to-end blocking-job behavior, should be exercised against a real PR
-once this is merged - see the acceptance criteria in the original spec.
-
-## Open questions
-
-- **Artifact retention period**: left at the default 90 days
-  (`artifact-retention-days` input on `sonar-baseline.yml`). Flagging back
-  per the spec rather than guessing a shorter/longer value - no reason surfaced
-  during implementation to deviate from the default.
+Artifact retention defaults to 90 days (`artifact-retention-days` input on
+`sonar-baseline.yml`) - no reason surfaced to deviate from that.
