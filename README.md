@@ -144,21 +144,17 @@ jobs:
 `@main` above is a placeholder: once this repo adopts release-please (or
 equivalent) tagging, pin consumers to a version tag (e.g. `@v1`) instead.
 
-## Local development
+## Testing
 
 ```sh
-sudo sysctl -w vm.max_map_count=262144
-docker compose -f docker-compose.ephemeral.yml up -d
-./scripts/wait_for_sonarqube.sh http://localhost:9000
-token=$(./scripts/bootstrap_sonarqube.sh http://localhost:9000 dev)
-SONAR_HOST_URL=http://localhost:9000 SONAR_TOKEN="$token" \
-  PROJECT_KEY=test PROJECT_BASE_DIR=fixtures \
-  COMPOSE_FILE=docker-compose.ephemeral.yml \
-  ./scripts/run_scan.sh
-python3 scripts/fetch_findings.py --host http://localhost:9000 --token "$token" \
-  --project-key test --out /tmp/findings.json
-docker compose -f docker-compose.ephemeral.yml down -v
+pip install -r requirements-dev.txt
+pytest tests/ -v
 ```
+
+See [`docs/test-procedure.md`](docs/test-procedure.md) for everything else:
+a full local end-to-end run, and how to deliberately exercise each
+baseline-resolution tier, hash-based matching, and the blocking policy
+against a real PR.
 
 ## Validation status
 
@@ -168,17 +164,15 @@ the code they affect - see `docker-compose.ephemeral.yml`'s `ulimits` block,
 `bootstrap_sonarqube.sh`'s password generator, and `run_scan.sh`'s
 `sonar.working.directory` / `SONAR_USER_HOME` handling.
 
-The full pipeline (scan → fetch → diff → policy) has been exercised twice:
-once locally against a fresh ephemeral instance (`fixtures/` baseline vs. a
-modified "head" copy - hash-based matching correctly excluded
-shifted-but-unchanged findings and surfaced the one genuinely new one), and
-once for real in this repo's own PR #1, which exercised the fallback
-baseline-resolution path (no artifact existed yet for a first-ever PR) and
-the blocking-job-failure path (fixtures/ itself trips 5 findings, 4 of them
-MAJOR-or-above) end-to-end on a GitHub-hosted runner.
+The pure-logic functions in each script (`scripts/*.py`) have a pytest suite
+(`tests/`), gated on 95% coverage via `vln-devsecops/actions-validate-coverage`
+in `ci.yml`. Network/CLI glue is deliberately excluded from that gate and
+validated live instead, the same way the rest of the pipeline is.
 
-Not yet exercised against a real PR: tier a/b artifact-based baseline
-resolution, which needs a prior push to a baseline branch first.
+The full pipeline (scan → fetch → diff → policy) has run against real PRs,
+beyond the local ephemeral-instance run: the fallback baseline-resolution
+path, the blocking-job-failure path, and tier a artifact-based baseline
+resolution have all run end-to-end.
 
 Artifact retention defaults to 90 days (`artifact-retention-days` input on
 `sonar-baseline.yml`) - no reason surfaced to deviate from that.
