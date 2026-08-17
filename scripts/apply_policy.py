@@ -37,8 +37,23 @@ ANNOTATION_LEVEL = {
 
 ANNOTATION_BATCH_SIZE = 50
 
+# fetch_findings.py guarantees every severity it emits is in SEVERITY_ORDER,
+# but baseline artifacts are persisted JSON that can be up to
+# artifact-retention-days old - a baseline written before that guarantee
+# existed can still carry a null/unknown severity. Fail closed on anything
+# unrecognized rather than crashing (ValueError/KeyError) or, worse, dropping
+# the finding silently out of the reported counts.
+UNKNOWN_SEVERITY_FALLBACK = "MAJOR"
+
+
+def severity_of(finding):
+    severity = finding.get("severity")
+    return severity if severity in SEVERITY_ORDER else UNKNOWN_SEVERITY_FALLBACK
+
 
 def severity_at_least(severity, threshold):
+    if severity not in SEVERITY_ORDER:
+        severity = UNKNOWN_SEVERITY_FALLBACK
     return SEVERITY_ORDER.index(severity) >= SEVERITY_ORDER.index(threshold)
 
 
@@ -60,14 +75,15 @@ def gh_api(method, url, token, body=None):  # pragma: no cover - network I/O, va
 
 def to_annotation(finding):
     line = finding.get("line") or 1
-    title = f"{finding['rule']} ({finding['severity']})"
+    severity = severity_of(finding)
+    title = f"{finding['rule']} ({severity})"
     if finding.get("type") == "SECURITY_HOTSPOT":
         title = f"Security Hotspot: {title}"
     return {
         "path": finding["path"],
         "start_line": line,
         "end_line": line,
-        "annotation_level": ANNOTATION_LEVEL[finding["severity"]],
+        "annotation_level": ANNOTATION_LEVEL[severity],
         "title": title,
         "message": finding.get("message", ""),
     }
@@ -76,7 +92,7 @@ def to_annotation(finding):
 def counts_by_severity(findings):
     counts = {s: 0 for s in SEVERITY_ORDER}
     for f in findings:
-        counts[f["severity"]] = counts.get(f["severity"], 0) + 1
+        counts[severity_of(f)] += 1
     return counts
 
 
@@ -163,7 +179,7 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
     with open(args.findings) as f:
         findings = json.load(f)
 
-    blocking_findings = [f for f in findings if severity_at_least(f["severity"], args.threshold)]
+    blocking_findings = [f for f in findings if severity_at_least(severity_of(f), args.threshold)]
     blocked = blocking_enabled and bool(blocking_findings)
 
     if blocked:

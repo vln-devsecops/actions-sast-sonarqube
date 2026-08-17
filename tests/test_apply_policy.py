@@ -1,11 +1,16 @@
+import json
+
 import pytest
 
 from apply_policy import (
+    ANNOTATION_LEVEL,
     SEVERITY_ORDER,
+    UNKNOWN_SEVERITY_FALLBACK,
     batch,
     build_summary,
     counts_by_severity,
     severity_at_least,
+    severity_of,
     to_annotation,
 )
 
@@ -28,6 +33,28 @@ def test_severity_at_least(severity, threshold, expected):
 
 def test_severity_order_is_low_to_high():
     assert SEVERITY_ORDER == ["INFO", "MINOR", "MAJOR", "CRITICAL", "BLOCKER"]
+
+
+def test_severity_at_least_fails_closed_on_unrecognized_severity():
+    """fetch_findings.py guarantees a valid severity, but baseline artifacts
+    are persisted JSON up to artifact-retention-days old and can predate that
+    guarantee. An unrecognized severity used to raise ValueError here
+    (SEVERITY_ORDER.index(None)) and crash the whole policy step."""
+    assert severity_at_least(None, "MAJOR") is True
+    assert severity_at_least("NOT_A_REAL_SEVERITY", "MAJOR") is True
+
+
+def test_severity_of_returns_valid_severity_unchanged():
+    assert severity_of({"severity": "MINOR"}) == "MINOR"
+
+
+@pytest.mark.parametrize("bad_severity", [None, "", "NOT_A_REAL_SEVERITY"])
+def test_severity_of_falls_back_on_unrecognized_severity(bad_severity):
+    assert severity_of({"severity": bad_severity}) == UNKNOWN_SEVERITY_FALLBACK
+
+
+def test_severity_of_falls_back_when_severity_key_missing():
+    assert severity_of({}) == UNKNOWN_SEVERITY_FALLBACK
 
 
 def test_to_annotation_shapes_finding_correctly():
@@ -56,6 +83,14 @@ def test_to_annotation_does_not_prefix_issues():
     assert to_annotation(finding)["title"] == "python:S1 (MAJOR)"
 
 
+def test_to_annotation_fails_closed_on_unrecognized_severity():
+    """This used to be a bare KeyError from ANNOTATION_LEVEL[None]."""
+    finding = {"path": "a.py", "line": 1, "rule": "r", "severity": None, "message": ""}
+    ann = to_annotation(finding)
+    assert ann["title"] == f"r ({UNKNOWN_SEVERITY_FALLBACK})"
+    assert ann["annotation_level"] == ANNOTATION_LEVEL[UNKNOWN_SEVERITY_FALLBACK]
+
+
 def test_to_annotation_defaults_missing_line_to_1():
     finding = {"path": "a.py", "line": None, "rule": "python:S1", "severity": "MINOR", "message": ""}
     ann = to_annotation(finding)
@@ -80,6 +115,20 @@ def test_counts_by_severity_includes_zero_counts_for_absent_severities():
 
 def test_counts_by_severity_empty_input():
     assert counts_by_severity([]) == {s: 0 for s in SEVERITY_ORDER}
+
+
+def test_counts_by_severity_never_silently_drops_an_unrecognized_severity():
+    """This used to insert a None key instead of counting the finding under
+    a known severity - json.dump(..., sort_keys=True) on that result then
+    raised TypeError (can't order None against str), and even where
+    serialization succeeded, post_pr_comment.render_body()'s fixed severity
+    list never rendered the None-keyed count - the PR comment reported an
+    all-zeros table while a real finding existed."""
+    counts = counts_by_severity([{"severity": None}])
+    assert None not in counts
+    assert sum(counts.values()) == 1
+    assert counts[UNKNOWN_SEVERITY_FALLBACK] == 1
+    json.dumps(counts, sort_keys=True)  # must not raise
 
 
 def test_build_summary_blocking_enabled_reports_count():
