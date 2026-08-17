@@ -42,7 +42,7 @@ def severity_at_least(severity, threshold):
     return SEVERITY_ORDER.index(severity) >= SEVERITY_ORDER.index(threshold)
 
 
-def gh_api(method, url, token, body=None):
+def gh_api(method, url, token, body=None):  # pragma: no cover - network I/O, validated live
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {token}")
@@ -99,11 +99,18 @@ def build_summary(findings, blocking_findings, threshold, blocking_enabled):
     return "\n".join(lines)
 
 
-def create_check_run(repo, token, sha, check_name, conclusion, summary, annotations):
+def batch(items, size):
+    """Split items into consecutive chunks of at most `size`. GitHub's Check
+    Run API only accepts ANNOTATION_BATCH_SIZE annotations per request, so
+    the first batch goes in the creating POST and the rest follow as PATCHes."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def create_check_run(repo, token, sha, check_name, conclusion, summary, annotations):  # pragma: no cover - network I/O, validated live
     owner, name = repo.split("/", 1)
     base_url = f"https://api.github.com/repos/{owner}/{name}/check-runs"
 
-    first_batch, remaining = annotations[:ANNOTATION_BATCH_SIZE], annotations[ANNOTATION_BATCH_SIZE:]
+    batches = batch(annotations, ANNOTATION_BATCH_SIZE) or [[]]
     check_run = gh_api(
         "POST",
         base_url,
@@ -116,26 +123,25 @@ def create_check_run(repo, token, sha, check_name, conclusion, summary, annotati
             "output": {
                 "title": check_name,
                 "summary": summary,
-                "annotations": first_batch,
+                "annotations": batches[0],
             },
         },
     )
 
     check_run_id = check_run["id"]
     update_url = f"{base_url}/{check_run_id}"
-    while remaining:
-        batch, remaining = remaining[:ANNOTATION_BATCH_SIZE], remaining[ANNOTATION_BATCH_SIZE:]
+    for remaining_batch in batches[1:]:
         gh_api(
             "PATCH",
             update_url,
             token,
-            {"output": {"title": check_name, "summary": summary, "annotations": batch}},
+            {"output": {"title": check_name, "summary": summary, "annotations": remaining_batch}},
         )
 
     return check_run
 
 
-def main():
+def main():  # pragma: no cover - CLI glue over the above, validated live
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--findings", required=True, help="Path to new-findings JSON (diff_findings.py output)")
     parser.add_argument("--threshold", default="MAJOR", choices=SEVERITY_ORDER)

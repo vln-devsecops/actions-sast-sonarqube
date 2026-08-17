@@ -26,6 +26,14 @@ def diff(baseline, head):
     return [f for f in head if finding_key(f) not in baseline_keys]
 
 
+def filter_by_changed_files(findings, changed_files):
+    """Keep only findings whose `path` is in `changed_files`. Both must be in
+    the same path-space as each other - the caller (sonar-pr.yml) computes
+    changed_files relative to project-base-dir, matching how findings' paths
+    are normalized, not the repo root."""
+    return [f for f in findings if f["path"] in changed_files]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", required=True, help="Path to baseline findings JSON")
@@ -34,8 +42,10 @@ def main():
     parser.add_argument(
         "--changed-files",
         help=(
-            "Optional path to a newline-delimited list of files touched by the PR "
-            "(repo-root-relative). When given, new findings outside this set are dropped."
+            "Optional path to a newline-delimited list of files touched by the PR, "
+            "in the same path-space as findings' `path` (i.e. relative to "
+            "project-base-dir, not necessarily the repo root). When given, new "
+            "findings outside this set are dropped."
         ),
     )
     args = parser.parse_args()
@@ -50,7 +60,7 @@ def main():
     if args.changed_files:
         with open(args.changed_files) as f:
             changed_files = {line.strip() for line in f if line.strip()}
-        new_findings = [f for f in new_findings if f["path"] in changed_files]
+        new_findings = filter_by_changed_files(new_findings, changed_files)
 
     with open(args.out, "w") as f:
         json.dump(new_findings, f, indent=2, sort_keys=True)

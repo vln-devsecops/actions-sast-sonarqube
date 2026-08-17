@@ -8,8 +8,39 @@ on:
   workflow_dispatch:
 
 jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: python3 -m pytest tests/ -v --cov=scripts --cov-report=xml:coverage.xml --cov-report=term-missing
+
+      - name: Validate coverage
+        uses: vln-devsecops/actions-validate-coverage@v1
+        with:
+          coverage-file: coverage.xml
+          coverage-type: cobertura
+          minimum-coverage: "95"
+
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: ./scripts
+
   baseline:
     if: github.event_name == 'push'
+    needs: unit-tests
     uses: ./.github/workflows/sonar-baseline.yml
     permissions:
       contents: read
@@ -20,6 +51,7 @@ jobs:
 
   pr-scan:
     if: github.event_name == 'pull_request'
+    needs: unit-tests
     uses: ./.github/workflows/sonar-pr.yml
     permissions:
       contents: read

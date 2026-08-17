@@ -22,7 +22,7 @@ import urllib.request
 import zipfile
 
 
-def gh_api_get(url, token):
+def gh_api_get(url, token):  # pragma: no cover - network I/O, validated live
     req = urllib.request.Request(url)
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Accept", "application/vnd.github+json")
@@ -35,13 +35,10 @@ def gh_api_get(url, token):
         raise SystemExit(f"GitHub API GET {url} failed: HTTP {e.code}\n{body}")
 
 
-def find_artifact(owner, repo, name, token):
-    url = (
-        f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
-        f"?name={urllib.parse.quote(name)}&per_page=100"
-    )
-    data = gh_api_get(url, token)
-    candidates = [a for a in data.get("artifacts", []) if a["name"] == name and not a["expired"]]
+def select_artifact(artifacts, name):
+    """Pick the artifact to use from a listing API response's `artifacts`
+    array: exact name match, not expired, newest first."""
+    candidates = [a for a in artifacts if a["name"] == name and not a["expired"]]
     if not candidates:
         return None
     # Exact-name matches for a content-addressed artifact name should never
@@ -50,17 +47,40 @@ def find_artifact(owner, repo, name, token):
     return candidates[0]
 
 
-def download_and_extract(artifact, token, dest_dir):
+def find_artifact(owner, repo, name, token):  # pragma: no cover - network I/O, validated live
+    url = (
+        f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
+        f"?name={urllib.parse.quote(name)}&per_page=100"
+    )
+    data = gh_api_get(url, token)
+    return select_artifact(data.get("artifacts", []), name)
+
+
+class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+    """`archive_download_url` 302s to a signed, short-lived blob-storage URL
+    that doesn't expect (and errors on) our GitHub Authorization header -
+    urllib forwards all original headers across a redirect by default, which
+    breaks the download with a 401 from the storage host, not GitHub."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            new_req.remove_header("Authorization")
+        return new_req
+
+
+def download_and_extract(artifact, token, dest_dir):  # pragma: no cover - network I/O, validated live
     req = urllib.request.Request(artifact["archive_download_url"])
     req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    opener = urllib.request.build_opener(_StripAuthOnRedirect)
+    with opener.open(req, timeout=120) as resp:
         blob = resp.read()
     os.makedirs(dest_dir, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         zf.extractall(dest_dir)
 
 
-def main():
+def main():  # pragma: no cover - CLI glue over the above, validated live
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="owner/repo")
     parser.add_argument("--name", required=True, help="exact artifact name to look up")

@@ -17,7 +17,7 @@ import urllib.request
 MARKER = "<!-- sonarqube-community-action:pr-summary -->"
 
 
-def gh_api(method, url, token, body=None):
+def gh_api(method, url, token, body=None):  # pragma: no cover - network I/O, validated live
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {token}")
@@ -33,7 +33,7 @@ def gh_api(method, url, token, body=None):
         raise SystemExit(f"GitHub API {method} {url} failed: HTTP {e.code}\n{body_text}")
 
 
-def find_existing_comment(owner, repo, pr_number, token):
+def find_existing_comment(owner, repo, pr_number, token):  # pragma: no cover - network I/O, validated live
     page = 1
     while True:
         url = (
@@ -53,7 +53,7 @@ def render_body(result, baseline_tier):
     counts = result["by_severity"]
     order = ["BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO"]
 
-    lines = ["## SonarQube Community scan", ""]
+    lines = ["## SAST SonarQube scan", ""]
     if result["blocked"]:
         lines.append(f"**Blocked** - a new finding meets or exceeds the `{result['threshold']}` threshold.")
     elif result["total_new_findings"]:
@@ -69,7 +69,7 @@ def render_body(result, baseline_tier):
     return "\n".join(lines)
 
 
-def main():
+def main():  # pragma: no cover - CLI glue over the above, validated live
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="owner/repo")
     parser.add_argument("--pr-number", required=True, type=int)
