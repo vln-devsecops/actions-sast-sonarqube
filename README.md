@@ -144,21 +144,17 @@ jobs:
 `@main` above is a placeholder: once this repo adopts release-please (or
 equivalent) tagging, pin consumers to a version tag (e.g. `@v1`) instead.
 
-## Local development
+## Testing
 
 ```sh
-sudo sysctl -w vm.max_map_count=262144
-docker compose -f docker-compose.ephemeral.yml up -d
-./scripts/wait_for_sonarqube.sh http://localhost:9000
-token=$(./scripts/bootstrap_sonarqube.sh http://localhost:9000 dev)
-SONAR_HOST_URL=http://localhost:9000 SONAR_TOKEN="$token" \
-  PROJECT_KEY=test PROJECT_BASE_DIR=fixtures \
-  COMPOSE_FILE=docker-compose.ephemeral.yml \
-  ./scripts/run_scan.sh
-python3 scripts/fetch_findings.py --host http://localhost:9000 --token "$token" \
-  --project-key test --out /tmp/findings.json
-docker compose -f docker-compose.ephemeral.yml down -v
+pip install -r requirements-dev.txt
+pytest tests/ -v
 ```
+
+See [`docs/test-procedure.md`](docs/test-procedure.md) for everything else:
+a full local end-to-end run, and how to deliberately exercise each
+baseline-resolution tier, hash-based matching, and the blocking policy
+against a real PR.
 
 ## Validation status
 
@@ -173,22 +169,14 @@ The pure-logic functions in each script (`scripts/*.py`) have a pytest suite
 in `ci.yml`. Network/CLI glue is deliberately excluded from that gate and
 validated live instead, the same way the rest of the pipeline is.
 
-The full pipeline (scan → fetch → diff → policy) has been exercised against
-real PRs, beyond the local ephemeral-instance run (`fixtures/` baseline vs. a
-modified "head" copy - hash-based matching correctly excluded
-shifted-but-unchanged findings and surfaced the one genuinely new one):
-
-- The fallback baseline-resolution path (no artifact exists yet, e.g. a
-  first-ever PR) and the blocking-job-failure path (`fixtures/` itself trips
-  5 findings, 4 of them MAJOR-or-above) have both run end-to-end.
-- Tier a artifact-based baseline resolution has run end-to-end too. Exercising
-  it live caught a real bug on first try: the artifact download's redirect to
-  blob storage rejected a forwarded GitHub `Authorization` header with a 401
-  (fixed - see `find_baseline_artifact.py`).
-
-Not yet exercised against a real PR: tier b artifact-based baseline
-resolution specifically (needs the merge-base artifact to be missing or
-expired while the target branch's current-HEAD artifact still exists).
+The full pipeline (scan → fetch → diff → policy) has run against real PRs,
+beyond the local ephemeral-instance run: the fallback baseline-resolution
+path, the blocking-job-failure path, and tier a artifact-based baseline
+resolution have all run end-to-end. Exercising tier a live caught a real bug
+on first try: the artifact download's redirect to blob storage rejected a
+forwarded GitHub `Authorization` header with a 401 (fixed - see
+`find_baseline_artifact.py`). Tier b hasn't been exercised against a real PR
+yet - see the test procedure doc for how to set that up deliberately.
 
 Artifact retention defaults to 90 days (`artifact-retention-days` input on
 `sonar-baseline.yml`) - no reason surfaced to deviate from that.
