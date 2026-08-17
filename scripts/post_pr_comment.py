@@ -53,7 +53,7 @@ def render_body(result, baseline_tier):
     counts = result["by_severity"]
     order = ["BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO"]
 
-    lines = ["## SonarQube Community scan", ""]
+    lines = ["## SAST SonarQube scan", ""]
     if result["blocked"]:
         lines.append(f"**Blocked** - a new finding meets or exceeds the `{result['threshold']}` threshold.")
     elif result["total_new_findings"]:
