@@ -39,7 +39,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # This reusable workflow is meant to be called by other repos, so it
       # can't assume its own composite action (action.yml) is checked out at
@@ -57,7 +57,7 @@ jobs:
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout this action's source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ steps.action-source.outputs.repo }}
           ref: ${{ steps.action-source.outputs.ref }}
@@ -89,7 +89,7 @@ jobs:
           project-base-dir: ${{ inputs.project-base-dir }}
 
       - name: Upload baseline findings artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sonar-baseline-${{ github.sha }}
           path: ${{ steps.scan.outputs.findings-json }}

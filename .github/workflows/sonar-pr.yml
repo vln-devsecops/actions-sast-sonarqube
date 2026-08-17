@@ -43,7 +43,7 @@ jobs:
       actions: read
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
@@ -82,7 +82,7 @@ jobs:
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout this action's source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ steps.action-source.outputs.repo }}
           ref: ${{ steps.action-source.outputs.ref }}
@@ -130,7 +130,7 @@ jobs:
 
       - name: Checkout target branch HEAD (fallback path only)
         if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: .baseline-checkout
