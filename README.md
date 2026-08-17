@@ -44,14 +44,8 @@ action.yml                     Composite action: "run one scan against a
                                 push to dev and every PR.
 ```
 
-### Why not `services:` for SonarQube/Postgres?
-
-Elasticsearch (bundled in SonarQube) requires `vm.max_map_count=262144` set
-on the **host** before the container starts, or it crash-loops. GitHub
-Actions `services:` containers start before any job steps run, so the sysctl
-can't be applied in time. Both workflows instead run
-`sudo sysctl -w vm.max_map_count=262144` in a step, then
-`docker compose -f docker-compose.ephemeral.yml up -d` in the next one.
+See [`docs/design.md`](docs/design.md) for architecture-level rationale
+(e.g. why the SonarQube/Postgres stack isn't a `services:` block).
 
 ### Baseline resolution for PRs
 
@@ -150,14 +144,6 @@ jobs:
 `@main` above is a placeholder: once this repo adopts release-please (or
 equivalent) tagging, pin consumers to a version tag (e.g. `@v1`) instead.
 
-If this action's repo is private, the consumer repo needs read access to it:
-**Settings → Actions → General → Access** on this repo, "Accessible from
-repositories in the `vln-devsecops` organization" (or equivalent) - both
-reusable workflows checkout this repo's own source (pinned to the exact
-ref/commit the reusable workflow itself is running from) to invoke
-`action.yml`, since `uses: ./` inside a reusable workflow resolves against
-whatever the *caller's* checkout populated, not this repo.
-
 ## Local development
 
 ```sh
@@ -174,13 +160,6 @@ python3 scripts/fetch_findings.py --host http://localhost:9000 --token "$token" 
 docker compose -f docker-compose.ephemeral.yml down -v
 ```
 
-## Deviations from the original spec
-
-**`scripts/find_baseline_artifact.py`** and **`scripts/post_pr_comment.py`**
-(not in the original script list): the spec calls out the need for both
-(cross-run artifact lookup via the REST API; create-or-update PR comment
-via a hidden marker) without naming a script for them.
-
 ## Validation status
 
 Rationale for specific implementation choices (the ones that only surfaced by
@@ -194,13 +173,12 @@ once locally against a fresh ephemeral instance (`fixtures/` baseline vs. a
 modified "head" copy - hash-based matching correctly excluded
 shifted-but-unchanged findings and surfaced the one genuinely new one), and
 once for real in this repo's own PR #1, which exercised the fallback
-baseline-resolution path end-to-end on a GitHub-hosted runner (no artifact
-existed yet for a first-ever PR).
+baseline-resolution path (no artifact existed yet for a first-ever PR) and
+the blocking-job-failure path (fixtures/ itself trips 5 findings, 4 of them
+MAJOR-or-above) end-to-end on a GitHub-hosted runner.
 
 Not yet exercised against a real PR: tier a/b artifact-based baseline
-resolution (needs a prior push to a baseline branch first) and the
-blocking-job-failure path (needs a PR that actually introduces a
-MAJOR-or-above finding).
+resolution, which needs a prior push to a baseline branch first.
 
 Artifact retention defaults to 90 days (`artifact-retention-days` input on
 `sonar-baseline.yml`) - no reason surfaced to deviate from that.
