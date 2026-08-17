@@ -50,6 +50,32 @@ VULNERABILITY_PROBABILITY_TO_SEVERITY = {
     "LOW": "MINOR",
 }
 
+VALID_SEVERITIES = ("INFO", "MINOR", "MAJOR", "CRITICAL", "BLOCKER")
+
+# SonarQube should always populate a legacy `severity` for issues and a
+# recognized `vulnerabilityProbability` for hotspots, but neither is
+# guaranteed by the API contract - a field can be absent, and a future
+# SonarQube can add a probability value this mapping doesn't know. A finding
+# whose severity can't be determined must never silently vanish from a
+# security gate, so it fails closed at the default blocking threshold
+# instead of being emitted as null.
+UNKNOWN_SEVERITY_FALLBACK = "MAJOR"
+
+
+def _coerce_severity(severity, finding_desc):
+    """Guarantee the findings schema's `severity` invariant: always one of
+    VALID_SEVERITIES, never None. Anything unrecognized fails closed and is
+    reported on stderr so it surfaces in the job log rather than silently
+    changing the gate's behaviour."""
+    if severity in VALID_SEVERITIES:
+        return severity
+    print(
+        f"warning: {finding_desc} has unrecognized severity {severity!r}; "
+        f"treating it as {UNKNOWN_SEVERITY_FALLBACK}",
+        file=sys.stderr,
+    )
+    return UNKNOWN_SEVERITY_FALLBACK
+
 
 def api_get(host, token, path, params):  # pragma: no cover - network I/O, validated live
     url = f"{host.rstrip('/')}{path}?{urllib.parse.urlencode(params)}"
@@ -70,13 +96,14 @@ def _strip_component_prefix(component, project_key):
 
 
 def normalize(issue, project_key):
+    path = _strip_component_prefix(issue.get("component", ""), project_key)
     return {
         "type": "ISSUE",
         "rule": issue.get("rule"),
-        "path": _strip_component_prefix(issue.get("component", ""), project_key),
+        "path": path,
         "hash": issue.get("hash") or None,
         "line": issue.get("line"),
-        "severity": issue.get("severity"),
+        "severity": _coerce_severity(issue.get("severity"), f"issue {issue.get('rule')!r} in {path}"),
         "impacts": [
             {
                 "softwareQuality": impact.get("softwareQuality"),
@@ -89,13 +116,19 @@ def normalize(issue, project_key):
 
 
 def normalize_hotspot(hotspot, project_key):
+    path = _strip_component_prefix(hotspot.get("component", ""), project_key)
+    probability = hotspot.get("vulnerabilityProbability")
     return {
         "type": "SECURITY_HOTSPOT",
         "rule": hotspot.get("ruleKey"),
-        "path": _strip_component_prefix(hotspot.get("component", ""), project_key),
+        "path": path,
         "hash": None,
         "line": hotspot.get("line"),
-        "severity": VULNERABILITY_PROBABILITY_TO_SEVERITY.get(hotspot.get("vulnerabilityProbability")),
+        "severity": _coerce_severity(
+            VULNERABILITY_PROBABILITY_TO_SEVERITY.get(probability),
+            f"hotspot {hotspot.get('ruleKey')!r} in {path} "
+            f"(vulnerabilityProbability={probability!r})",
+        ),
         "impacts": [],
         "message": hotspot.get("message", ""),
     }
