@@ -35,19 +35,25 @@ def gh_api_get(url, token):
         raise SystemExit(f"GitHub API GET {url} failed: HTTP {e.code}\n{body}")
 
 
-def find_artifact(owner, repo, name, token):
-    url = (
-        f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
-        f"?name={urllib.parse.quote(name)}&per_page=100"
-    )
-    data = gh_api_get(url, token)
-    candidates = [a for a in data.get("artifacts", []) if a["name"] == name and not a["expired"]]
+def select_artifact(artifacts, name):
+    """Pick the artifact to use from a listing API response's `artifacts`
+    array: exact name match, not expired, newest first."""
+    candidates = [a for a in artifacts if a["name"] == name and not a["expired"]]
     if not candidates:
         return None
     # Exact-name matches for a content-addressed artifact name should never
     # collide across runs, but if they somehow do, prefer the newest.
     candidates.sort(key=lambda a: a["created_at"], reverse=True)
     return candidates[0]
+
+
+def find_artifact(owner, repo, name, token):
+    url = (
+        f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
+        f"?name={urllib.parse.quote(name)}&per_page=100"
+    )
+    data = gh_api_get(url, token)
+    return select_artifact(data.get("artifacts", []), name)
 
 
 def download_and_extract(artifact, token, dest_dir):

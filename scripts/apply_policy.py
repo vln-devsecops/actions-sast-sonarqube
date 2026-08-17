@@ -99,11 +99,18 @@ def build_summary(findings, blocking_findings, threshold, blocking_enabled):
     return "\n".join(lines)
 
 
+def batch(items, size):
+    """Split items into consecutive chunks of at most `size`. GitHub's Check
+    Run API only accepts ANNOTATION_BATCH_SIZE annotations per request, so
+    the first batch goes in the creating POST and the rest follow as PATCHes."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
 def create_check_run(repo, token, sha, check_name, conclusion, summary, annotations):
     owner, name = repo.split("/", 1)
     base_url = f"https://api.github.com/repos/{owner}/{name}/check-runs"
 
-    first_batch, remaining = annotations[:ANNOTATION_BATCH_SIZE], annotations[ANNOTATION_BATCH_SIZE:]
+    batches = batch(annotations, ANNOTATION_BATCH_SIZE) or [[]]
     check_run = gh_api(
         "POST",
         base_url,
@@ -116,20 +123,19 @@ def create_check_run(repo, token, sha, check_name, conclusion, summary, annotati
             "output": {
                 "title": check_name,
                 "summary": summary,
-                "annotations": first_batch,
+                "annotations": batches[0],
             },
         },
     )
 
     check_run_id = check_run["id"]
     update_url = f"{base_url}/{check_run_id}"
-    while remaining:
-        batch, remaining = remaining[:ANNOTATION_BATCH_SIZE], remaining[ANNOTATION_BATCH_SIZE:]
+    for remaining_batch in batches[1:]:
         gh_api(
             "PATCH",
             update_url,
             token,
-            {"output": {"title": check_name, "summary": summary, "annotations": batch}},
+            {"output": {"title": check_name, "summary": summary, "annotations": remaining_batch}},
         )
 
     return check_run
