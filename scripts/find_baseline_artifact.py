@@ -56,10 +56,24 @@ def find_artifact(owner, repo, name, token):
     return select_artifact(data.get("artifacts", []), name)
 
 
+class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+    """`archive_download_url` 302s to a signed, short-lived blob-storage URL
+    that doesn't expect (and errors on) our GitHub Authorization header -
+    urllib forwards all original headers across a redirect by default, which
+    breaks the download with a 401 from the storage host, not GitHub."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            new_req.remove_header("Authorization")
+        return new_req
+
+
 def download_and_extract(artifact, token, dest_dir):
     req = urllib.request.Request(artifact["archive_download_url"])
     req.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    opener = urllib.request.build_opener(_StripAuthOnRedirect)
+    with opener.open(req, timeout=120) as resp:
         blob = resp.read()
     os.makedirs(dest_dir, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:

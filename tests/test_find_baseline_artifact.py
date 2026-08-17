@@ -1,4 +1,8 @@
-from find_baseline_artifact import select_artifact
+import http.server
+import threading
+import urllib.request
+
+from find_baseline_artifact import _StripAuthOnRedirect, select_artifact
 
 
 def artifact(name="sonar-baseline-abc123", expired=False, created_at="2026-01-01T00:00:00Z", **extra):
@@ -37,3 +41,41 @@ def test_select_artifact_skips_expired_even_if_only_candidate_with_matching_name
         artifact(name="sonar-baseline-other", expired=False, id=2),
     ]
     assert select_artifact(artifacts, "sonar-baseline-abc123") is None
+
+
+def test_redirect_handler_strips_authorization_header_on_redirect():
+    """Regression test: GitHub's archive_download_url 302s to a signed
+    blob-storage URL that rejects a forwarded GitHub Authorization header
+    with a 401. Confirms our custom redirect handler strips it, using a
+    real local HTTP server + real urllib redirect handling (not mocked)."""
+    seen_auth_on_final = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            if self.path == "/initial":
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{server.server_port}/final")
+                self.end_headers()
+            elif self.path == "/final":
+                seen_auth_on_final.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/initial")
+        req.add_header("Authorization", "Bearer secret-token")
+        opener = urllib.request.build_opener(_StripAuthOnRedirect)
+        with opener.open(req, timeout=5) as resp:
+            body = resp.read()
+    finally:
+        server.shutdown()
+
+    assert body == b"ok"
+    assert seen_auth_on_final == [None]
