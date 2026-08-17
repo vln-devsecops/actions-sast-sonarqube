@@ -155,6 +155,21 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           path: .baseline-checkout
 
+      # project-base-dir might not exist yet on the target branch at all -
+      # e.g. this PR is the one introducing it. That's not a misconfiguration
+      # (unlike project-base-dir missing from the PR head, which action.yml
+      # rightly fails on): it just means there's nothing to compare against,
+      # so every finding in the head scan is new by definition.
+      - name: Check whether target branch has project-base-dir
+        id: fallback-base-dir-check
+        if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
+        run: |
+          if [[ -d ".baseline-checkout/${{ inputs.project-base-dir }}" ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Raise vm.max_map_count for Elasticsearch
         run: sudo sysctl -w vm.max_map_count=262144
 
@@ -173,13 +188,20 @@ jobs:
 
       - name: Scan target branch HEAD (fallback path only)
         id: fallback-base-scan
-        if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
+        if: steps.fallback-base-dir-check.outputs.exists == 'true'
         uses: ./.sast-sonarqube
         with:
           sonar-host-url: http://localhost:9000
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: ${{ inputs.project-key }}-fallback-base
           project-base-dir: .baseline-checkout/${{ inputs.project-base-dir }}
+
+      - name: Use empty baseline (target branch lacks project-base-dir)
+        id: fallback-empty-baseline
+        if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true' && steps.fallback-base-dir-check.outputs.exists != 'true'
+        run: |
+          echo '[]' > empty-baseline-findings.json
+          echo "findings-json=empty-baseline-findings.json" >> "$GITHUB_OUTPUT"
 
       - name: Scan PR head
         id: head-scan
@@ -195,8 +217,10 @@ jobs:
         run: |
           if [[ "${{ steps.tier-a.outputs.found }}" == "true" || "${{ steps.tier-b.outputs.found }}" == "true" ]]; then
             path="$(find .baseline-artifact -name '*.json' -print -quit)"
-          else
+          elif [[ "${{ steps.fallback-base-dir-check.outputs.exists }}" == "true" ]]; then
             path="${{ steps.fallback-base-scan.outputs.findings-json }}"
+          else
+            path="${{ steps.fallback-empty-baseline.outputs.findings-json }}"
           fi
           if [[ -z "$path" ]]; then
             echo "Could not resolve a baseline findings file." >&2
