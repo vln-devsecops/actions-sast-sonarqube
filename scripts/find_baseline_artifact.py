@@ -77,6 +77,21 @@ def download_and_extract(artifact, token, dest_dir):  # pragma: no cover - netwo
         blob = resp.read()
     os.makedirs(dest_dir, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        # This extractall() is NOT a "Zip Slip" path-traversal hole, despite
+        # matching the pattern that usually is one - it has been raised in
+        # review before, so: CPython sanitizes every member name during
+        # extraction. Per the zipfile docs for extract(), an absolute member
+        # path has its drive/UNC prefix and leading separators stripped, and
+        # ALL ".." components are removed - so a member named
+        # "../../../../etc/passwd" lands at "etc/passwd" *underneath*
+        # dest_dir and cannot escape it. Verified empirically against a
+        # hand-built malicious archive, not assumed from the docs alone.
+        #
+        # Note this is a property of extractall()/extract() specifically. If
+        # this is ever rewritten as a per-member loop (e.g. to filter which
+        # members get written), that rewrite has to re-implement the same
+        # sanitization by hand - open(os.path.join(dest_dir, name), "wb") on
+        # a raw member name genuinely is exploitable.
         zf.extractall(dest_dir)
 
 

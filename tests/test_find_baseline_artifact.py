@@ -1,6 +1,7 @@
 import http.server
 import threading
 import urllib.request
+import zipfile
 
 from find_baseline_artifact import _StripAuthOnRedirect, select_artifact
 
@@ -79,3 +80,32 @@ def test_redirect_handler_strips_authorization_header_on_redirect():
 
     assert body == b"ok"
     assert seen_auth_on_final == [None]
+
+
+def test_zip_extraction_cannot_escape_the_destination_directory(tmp_path):
+    """download_and_extract() relies on zipfile.extractall() sanitizing member
+    names rather than validating them itself. That reads like a "Zip Slip"
+    path-traversal bug and has been flagged in review on that basis, so pin
+    the behaviour it actually depends on: traversal and absolute-path members
+    must both stay underneath the destination directory.
+
+    If this ever fails, download_and_extract() is genuinely vulnerable and
+    needs its own per-member validation - it is not a test-only concern.
+    """
+    archive = tmp_path / "evil.zip"
+    dest = tmp_path / "dest"
+    escaped_marker = tmp_path / "ESCAPED"
+
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("../../ESCAPED", "pwned")
+        zf.writestr("/absolute/ESCAPED", "pwned")
+        zf.writestr("legit.json", "[]")
+
+    with zipfile.ZipFile(archive) as zf:
+        zf.extractall(dest)
+
+    assert not escaped_marker.exists(), "archive member escaped the destination directory"
+    extracted = {p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()}
+    assert extracted == {"ESCAPED", "absolute/ESCAPED", "legit.json"}
+    for path in dest.rglob("*"):
+        assert dest in path.parents or path.parent == dest
