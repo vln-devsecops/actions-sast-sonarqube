@@ -1,0 +1,67 @@
+name: sonarqube-community-ephemeral
+
+# Ephemeral SonarQube Community Build + Postgres, brought up fresh at the
+# start of every job and torn down at the end (`docker compose down -v`).
+# No named volumes: everything, including the database, dies with the
+# containers.
+#
+# IMPORTANT: this stack is intentionally NOT expressed as a GitHub Actions
+# `services:` block. Elasticsearch (bundled in SonarQube) requires
+# `vm.max_map_count=262144` on the *host* before the container starts, or it
+# crash-loops. `services:` containers start before any job steps run, so the
+# sysctl can't be applied in time. Bring this stack up manually with
+# `docker compose -f docker-compose.ephemeral.yml up -d` in a step that runs
+# after `sudo sysctl -w vm.max_map_count=262144`.
+services:
+  postgres:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: sonar
+      POSTGRES_DB: sonar
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonar"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - sonar-ephemeral
+
+  sonarqube:
+    image: sonarqube:26.8.0.126808-community
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://postgres:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: sonar
+    ports:
+      - "9000:9000"
+    networks:
+      - sonar-ephemeral
+    # The bundled Elasticsearch refuses to start unless the process can open
+    # at least 65535 file descriptors - a hard bootstrap check, separate from
+    # (and in addition to) the host's vm.max_map_count. GitHub Actions
+    # ubuntu-latest runners default well above this, but set it explicitly
+    # rather than depend on the runner image's default.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # Never started by `docker compose up -d` (default profile only activates
+  # services with no `profiles:` list, and this one is gated behind
+  # `scanner`). This entry exists purely so Dependabot's `docker` ecosystem
+  # scan of this file also tracks and bumps the sonar-scanner-cli image that
+  # scripts/run_scan.sh invokes via `docker run`. run_scan.sh reads the pinned
+  # tag back out of this file at run time (via `docker compose config
+  # --images --profile scanner`) so the version is declared exactly once.
+  scanner:
+    image: sonarsource/sonar-scanner-cli:12.1.0.3233_8.0.1
+    profiles: ["scanner"]
+    entrypoint: ["true"]
+
+networks:
+  sonar-ephemeral:
+    driver: bridge

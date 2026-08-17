@@ -1,0 +1,272 @@
+name: SonarQube Community PR scan
+
+on:
+  workflow_call:
+    inputs:
+      project-key:
+        description: >-
+          SonarQube project key to scan under. Only needs to be unique within
+          a single job's ephemeral instance (every run gets a fresh
+          SonarQube), so the repo name is a fine default - note SonarQube
+          project keys can't contain "/", so this deliberately isn't
+          github.repository (owner/repo).
+        type: string
+        default: ${{ github.event.repository.name }}
+      project-base-dir:
+        description: Path (relative to the repo root) to scan.
+        type: string
+        default: .
+      severity-threshold:
+        description: Minimum legacy severity (INFO/MINOR/MAJOR/CRITICAL/BLOCKER) a new finding must have to block the job.
+        type: string
+        default: MAJOR
+      blocking:
+        description: Whether a new finding at or above severity-threshold fails the job.
+        type: boolean
+        default: true
+      post-pr-comment:
+        description: Whether to post/update a human-readable summary comment on the PR.
+        type: boolean
+        default: true
+      check-name:
+        description: Name of the GitHub Check Run this workflow creates.
+        type: string
+        default: sonarqube-community/new-findings
+
+jobs:
+  pr-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+      actions: read
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Fetch base branch history
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: git fetch origin "$BASE_REF"
+
+      - name: Resolve merge-base and target HEAD
+        id: refs
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          TARGET_HEAD_SHA: ${{ github.event.pull_request.base.sha }}
+          PROJECT_BASE_DIR: ${{ inputs.project-base-dir }}
+        run: |
+          merge_base="$(git merge-base "origin/${BASE_REF}" HEAD)"
+          echo "merge-base=${merge_base}" >> "$GITHUB_OUTPUT"
+          echo "target-head-sha=${TARGET_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
+          # SonarQube reports each finding's path relative to
+          # project-base-dir, not the repo root - but `git diff` paths are
+          # always repo-root-relative. Scope+strip to project-base-dir so
+          # diff_findings.py's --changed-files filter is comparing the same
+          # path space; otherwise, whenever project-base-dir isn't the repo
+          # root, every finding looks "untouched" and gets dropped.
+          base_dir="${PROJECT_BASE_DIR#./}"
+          base_dir="${base_dir%/}"
+          if [[ -z "$base_dir" || "$base_dir" == "." ]]; then
+            git diff --name-only "${merge_base}..HEAD" > changed-files.txt
+          else
+            git diff --name-only "${merge_base}..HEAD" -- "$base_dir" \
+              | sed "s#^${base_dir}/##" > changed-files.txt
+          fi
+          echo "Files touched by this PR (relative to project-base-dir):"
+          cat changed-files.txt
+
+      # This reusable workflow is meant to be called by other repos, so it
+      # can't assume its own composite action (action.yml) is checked out at
+      # the workspace root - that root holds the CALLER's code. Fetch this
+      # action's own repo, pinned to the exact ref this workflow file itself
+      # is running from, into a side directory instead.
+      - name: Resolve this action's own source ref
+        id: action-source
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          ref="${WORKFLOW_REF#*@}"
+          repo="${WORKFLOW_REF%%/.github/*}"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout this action's source
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.action-source.outputs.repo }}
+          ref: ${{ steps.action-source.outputs.ref }}
+          path: .sast-sonarqube
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: "Look up baseline artifact (tier a: PR branch-off point)"
+        id: tier-a
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ARTIFACT_NAME: sonar-baseline-${{ steps.refs.outputs.merge-base }}
+        run: |
+          found="$(python3 .sast-sonarqube/scripts/find_baseline_artifact.py \
+            --repo "$REPO" --name "$ARTIFACT_NAME" --dest .baseline-artifact)"
+          echo "found=${found}" >> "$GITHUB_OUTPUT"
+
+      - name: "Look up baseline artifact (tier b: target branch current HEAD)"
+        id: tier-b
+        if: steps.tier-a.outputs.found != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ARTIFACT_NAME: sonar-baseline-${{ steps.refs.outputs.target-head-sha }}
+        run: |
+          found="$(python3 .sast-sonarqube/scripts/find_baseline_artifact.py \
+            --repo "$REPO" --name "$ARTIFACT_NAME" --dest .baseline-artifact)"
+          echo "found=${found}" >> "$GITHUB_OUTPUT"
+
+      - name: Record baseline resolution
+        id: baseline
+        run: |
+          if [[ "${{ steps.tier-a.outputs.found }}" == "true" ]]; then
+            tier="tier a: artifact for merge-base ${{ steps.refs.outputs.merge-base }}"
+          elif [[ "${{ steps.tier-b.outputs.found }}" == "true" ]]; then
+            tier="tier b: artifact for target branch HEAD ${{ steps.refs.outputs.target-head-sha }}"
+          else
+            tier="fallback: no artifact found, scanning target branch HEAD live in this job"
+          fi
+          echo "tier=${tier}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### SonarQube Community baseline resolution"
+            echo "${tier}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Baseline resolution: ${tier}"
+
+      - name: Checkout target branch HEAD (fallback path only)
+        if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .baseline-checkout
+
+      # project-base-dir might not exist yet on the target branch at all -
+      # e.g. this PR is the one introducing it. That's not a misconfiguration
+      # (unlike project-base-dir missing from the PR head, which action.yml
+      # rightly fails on): it just means there's nothing to compare against,
+      # so every finding in the head scan is new by definition.
+      - name: Check whether target branch has project-base-dir
+        id: fallback-base-dir-check
+        if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
+        run: |
+          if [[ -d ".baseline-checkout/${{ inputs.project-base-dir }}" ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Raise vm.max_map_count for Elasticsearch
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      - name: Start ephemeral SonarQube stack
+        run: docker compose -f .sast-sonarqube/docker-compose.ephemeral.yml up -d
+
+      - name: Wait for SonarQube to be ready
+        run: .sast-sonarqube/scripts/wait_for_sonarqube.sh http://localhost:9000
+
+      - name: Bootstrap admin token
+        id: bootstrap
+        run: |
+          token="$(.sast-sonarqube/scripts/bootstrap_sonarqube.sh http://localhost:9000 gha-pr)"
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "$GITHUB_OUTPUT"
+
+      - name: Scan target branch HEAD (fallback path only)
+        id: fallback-base-scan
+        if: steps.fallback-base-dir-check.outputs.exists == 'true'
+        uses: ./.sast-sonarqube
+        with:
+          sonar-host-url: http://localhost:9000
+          sonar-token: ${{ steps.bootstrap.outputs.token }}
+          project-key: ${{ inputs.project-key }}-fallback-base
+          project-base-dir: .baseline-checkout/${{ inputs.project-base-dir }}
+
+      - name: Use empty baseline (target branch lacks project-base-dir)
+        id: fallback-empty-baseline
+        if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true' && steps.fallback-base-dir-check.outputs.exists != 'true'
+        run: |
+          echo '[]' > empty-baseline-findings.json
+          echo "findings-json=empty-baseline-findings.json" >> "$GITHUB_OUTPUT"
+
+      - name: Scan PR head
+        id: head-scan
+        uses: ./.sast-sonarqube
+        with:
+          sonar-host-url: http://localhost:9000
+          sonar-token: ${{ steps.bootstrap.outputs.token }}
+          project-key: ${{ inputs.project-key }}
+          project-base-dir: ${{ inputs.project-base-dir }}
+
+      - name: Resolve baseline findings file
+        id: baseline-findings
+        run: |
+          if [[ "${{ steps.tier-a.outputs.found }}" == "true" || "${{ steps.tier-b.outputs.found }}" == "true" ]]; then
+            path="$(find .baseline-artifact -name '*.json' -print -quit)"
+          elif [[ "${{ steps.fallback-base-dir-check.outputs.exists }}" == "true" ]]; then
+            path="${{ steps.fallback-base-scan.outputs.findings-json }}"
+          else
+            path="${{ steps.fallback-empty-baseline.outputs.findings-json }}"
+          fi
+          if [[ -z "$path" ]]; then
+            echo "Could not resolve a baseline findings file." >&2
+            exit 1
+          fi
+          echo "path=${path}" >> "$GITHUB_OUTPUT"
+
+      - name: Diff findings
+        id: diff
+        run: |
+          python3 .sast-sonarqube/scripts/diff_findings.py \
+            --baseline "${{ steps.baseline-findings.outputs.path }}" \
+            --head "${{ steps.head-scan.outputs.findings-json }}" \
+            --changed-files changed-files.txt \
+            --out new-findings.json
+          echo "new-findings=new-findings.json" >> "$GITHUB_OUTPUT"
+
+      - name: Apply blocking policy
+        id: policy
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 .sast-sonarqube/scripts/apply_policy.py \
+            --findings "${{ steps.diff.outputs.new-findings }}" \
+            --threshold "${{ inputs.severity-threshold }}" \
+            --blocking "${{ inputs.blocking }}" \
+            --repo "$REPO" \
+            --sha "$HEAD_SHA" \
+            --check-name "${{ inputs.check-name }}" \
+            --result-out policy-result.json
+
+      - name: Post PR summary comment
+        if: always() && inputs.post-pr-comment && steps.diff.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 .sast-sonarqube/scripts/post_pr_comment.py \
+            --repo "$REPO" \
+            --pr-number "$PR_NUMBER" \
+            --result policy-result.json \
+            --baseline-tier "${{ steps.baseline.outputs.tier }}"
+
+      - name: Tear down ephemeral SonarQube stack
+        if: always()
+        run: docker compose -f .sast-sonarqube/docker-compose.ephemeral.yml down -v

@@ -1,0 +1,67 @@
+name: SAST SonarQube
+description: >-
+  Run a single SonarQube Community Build scan against a checked-out project
+  and return a normalized, tool-agnostic findings JSON file. Assumes a
+  SonarQube instance is already up and reachable (see docker-compose.ephemeral.yml
+  and scripts/wait_for_sonarqube.sh / scripts/bootstrap_sonarqube.sh, which are
+  invoked by the calling workflow, not by this action).
+author: vln-devsecops
+
+inputs:
+  sonar-host-url:
+    description: Base URL of the running SonarQube instance.
+    required: false
+    default: http://localhost:9000
+  sonar-token:
+    description: User token to authenticate to SonarQube with.
+    required: true
+  project-key:
+    description: SonarQube project key to analyze and report findings under.
+    required: true
+  project-base-dir:
+    description: Path to the checked-out project to scan.
+    required: true
+  scan-timeout-seconds:
+    description: How long to wait for the SonarQube background compute-engine task to finish.
+    required: false
+    default: "600"
+
+outputs:
+  findings-json:
+    description: Path to the normalized findings JSON file produced by this scan.
+    value: ${{ steps.fetch.outputs.findings-json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+
+    - name: Run SonarQube scan
+      id: scan
+      shell: bash
+      env:
+        SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
+        SONAR_TOKEN: ${{ inputs.sonar-token }}
+        PROJECT_KEY: ${{ inputs.project-key }}
+        PROJECT_BASE_DIR: ${{ inputs.project-base-dir }}
+        SCAN_TIMEOUT_SECONDS: ${{ inputs.scan-timeout-seconds }}
+        COMPOSE_FILE: ${{ github.action_path }}/docker-compose.ephemeral.yml
+      run: "${{ github.action_path }}/scripts/run_scan.sh"
+
+    - name: Fetch and normalize findings
+      id: fetch
+      shell: bash
+      run: |
+        set -euo pipefail
+        out_dir="${RUNNER_TEMP:-/tmp}/sonar-findings"
+        mkdir -p "$out_dir"
+        out_file="$out_dir/${{ inputs.project-key }}.json"
+        python3 "${{ github.action_path }}/scripts/fetch_findings.py" \
+          --host "${{ inputs.sonar-host-url }}" \
+          --token "${{ inputs.sonar-token }}" \
+          --project-key "${{ inputs.project-key }}" \
+          --out "$out_file"
+        echo "findings-json=$out_file" >> "$GITHUB_OUTPUT"

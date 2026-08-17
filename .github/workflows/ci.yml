@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: ["dev"]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+jobs:
+  baseline:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/sonar-baseline.yml
+    permissions:
+      contents: read
+    with:
+      baseline-branches: '["dev"]'
+      project-key: actions-sast-sonarqube-fixtures
+      project-base-dir: fixtures
+
+  pr-scan:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/sonar-pr.yml
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+      actions: read
+    with:
+      project-key: actions-sast-sonarqube-fixtures
+      project-base-dir: fixtures

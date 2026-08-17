@@ -1,0 +1,100 @@
+name: SonarQube Community baseline scan
+
+on:
+  workflow_call:
+    inputs:
+      baseline-branches:
+        description: >-
+          JSON array of branch names to treat as SAST baselines (main plus
+          any branch that's a PR target under branch protection). Push events
+          on these branches get a full scan, published as a findings artifact
+          keyed by commit SHA. Which branches qualify is a per-repo fact, so
+          the caller workflow's own `on.push.branches` filter should match
+          this list.
+        type: string
+        default: '["main"]'
+      project-key:
+        description: >-
+          SonarQube project key to scan under. Only needs to be unique within
+          a single job's ephemeral instance (every run gets a fresh
+          SonarQube), so the repo name is a fine default - note SonarQube
+          project keys can't contain "/", so this deliberately isn't
+          github.repository (owner/repo).
+        type: string
+        default: ${{ github.event.repository.name }}
+      project-base-dir:
+        description: Path (relative to the repo root) to scan.
+        type: string
+        default: .
+      artifact-retention-days:
+        description: Retention period for the uploaded findings artifact.
+        type: number
+        default: 90
+
+jobs:
+  baseline-scan:
+    if: contains(fromJSON(inputs.baseline-branches), github.ref_name)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # This reusable workflow is meant to be called by other repos, so it
+      # can't assume its own composite action (action.yml) is checked out at
+      # the workspace root - that root holds the CALLER's code. Fetch this
+      # action's own repo, pinned to the exact ref this workflow file itself
+      # is running from, into a side directory instead.
+      - name: Resolve this action's own source ref
+        id: action-source
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          ref="${WORKFLOW_REF#*@}"
+          repo="${WORKFLOW_REF%%/.github/*}"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout this action's source
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.action-source.outputs.repo }}
+          ref: ${{ steps.action-source.outputs.ref }}
+          path: .sast-sonarqube
+
+      - name: Raise vm.max_map_count for Elasticsearch
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      - name: Start ephemeral SonarQube stack
+        run: docker compose -f .sast-sonarqube/docker-compose.ephemeral.yml up -d
+
+      - name: Wait for SonarQube to be ready
+        run: .sast-sonarqube/scripts/wait_for_sonarqube.sh http://localhost:9000
+
+      - name: Bootstrap admin token
+        id: bootstrap
+        run: |
+          token="$(.sast-sonarqube/scripts/bootstrap_sonarqube.sh http://localhost:9000 gha-baseline)"
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "$GITHUB_OUTPUT"
+
+      - name: Run scan
+        id: scan
+        uses: ./.sast-sonarqube
+        with:
+          sonar-host-url: http://localhost:9000
+          sonar-token: ${{ steps.bootstrap.outputs.token }}
+          project-key: ${{ inputs.project-key }}
+          project-base-dir: ${{ inputs.project-base-dir }}
+
+      - name: Upload baseline findings artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sonar-baseline-${{ github.sha }}
+          path: ${{ steps.scan.outputs.findings-json }}
+          retention-days: ${{ inputs.artifact-retention-days }}
+
+      - name: Tear down ephemeral SonarQube stack
+        if: always()
+        run: docker compose -f .sast-sonarqube/docker-compose.ephemeral.yml down -v
