@@ -23,6 +23,11 @@ def finding_key(finding):
 
 
 def diff(baseline, head):
+    """Findings in `head` not present in `baseline`. Symmetric in the sense
+    that swapping the arguments (diff(head, baseline)) gives the opposite
+    direction - findings in `baseline` no longer present in `head`, i.e.
+    resolved findings - which main() uses for --removed-out below rather
+    than duplicating this logic."""
     baseline_keys = {finding_key(f) for f in baseline}
     return [f for f in head if finding_key(f) not in baseline_keys]
 
@@ -49,6 +54,15 @@ def main():
             "findings outside this set are dropped."
         ),
     )
+    parser.add_argument(
+        "--removed-out",
+        help=(
+            "Optional path to write resolved-findings JSON to (findings present in "
+            "baseline that are no longer in head). Informational only - not scoped "
+            "by --changed-files, since a resolved finding's own file may have been "
+            "deleted or moved rather than edited."
+        ),
+    )
     args = parser.parse_args()
 
     with open(args.baseline) as f:
@@ -66,6 +80,12 @@ def main():
     with open(args.out, "w") as f:
         json.dump(new_findings, f, indent=2, sort_keys=True)
         f.write("\n")
+
+    if args.removed_out:
+        removed_findings = diff(head, baseline)
+        with open(args.removed_out, "w") as f:
+            json.dump(removed_findings, f, indent=2, sort_keys=True)
+            f.write("\n")
 
     print(
         f"{len(new_findings)} new finding(s) out of {len(head)} head finding(s) "

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Post (or update) a human-readable PR summary comment from apply_policy.py's
-result JSON, plus the baseline findings diff_findings.py compared against
-(shown as a severity breakdown, so a reviewer can tell "0 new findings"
-against an already-clean baseline apart from "0 new findings" against one
-carrying a pile of known defects). This is in addition to the Check Run
-annotations apply_policy.py creates, not a replacement: annotations are
-inline-on-diff, this comment is the at-a-glance summary.
+result JSON, plus the baseline and resolved findings diff_findings.py
+compared against - shown as one severity-by-severity table (Baseline /
+Added / Removed), so a reviewer can tell "0 new findings" against an
+already-clean baseline apart from "0 new findings" against one carrying a
+pile of known defects, and see at a glance whether this PR is trending the
+defect count up or down. This is in addition to the Check Run annotations
+apply_policy.py creates, not a replacement: annotations are inline-on-diff,
+this comment is the at-a-glance summary.
 
 Matches on a hidden HTML-comment marker in the comment body (the same
 pattern used by most PR-bot actions) so repeated pushes to the same PR update
@@ -54,8 +56,8 @@ def find_existing_comment(owner, repo, pr_number, token):  # pragma: no cover - 
         page += 1
 
 
-def render_body(result, baseline_tier, baseline_counts):
-    counts = result["by_severity"]
+def render_body(result, baseline_tier, baseline_counts, removed_counts):
+    added_counts = result["by_severity"]
     order = ["BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO"]
 
     lines = ["## SAST SonarQube scan", ""]
@@ -65,21 +67,17 @@ def render_body(result, baseline_tier, baseline_counts):
         lines.append("Not blocked - no new finding meets the blocking severity threshold.")
     else:
         lines.append("No new findings introduced by this PR. :white_check_mark:")
-    lines += ["", "| Severity | New findings |", "| --- | --- |"]
-    lines += [f"| {sev} | {counts.get(sev, 0)} |" for sev in order]
 
-    # New findings alone can't tell a reviewer whether "0 new findings"
-    # means a clean baseline or one already carrying a pile of known
-    # defects - both looked identical in the comment before this table.
-    total_baseline = sum(baseline_counts.values())
+    # One table, not separate new-findings/baseline tables: Added alone
+    # can't tell a reviewer whether "0 new findings" means a clean baseline
+    # or one already carrying a pile of known defects, and a severity-level
+    # Baseline/Added/Removed row is what actually shows whether a PR is
+    # trending the defect count up or down.
+    lines += ["", "| Severity | Baseline | Added | Removed |", "| --- | --- | --- | --- |"]
     lines += [
-        "",
-        f"**Baseline** - {total_baseline} finding(s) already present before this PR:",
-        "",
-        "| Severity | Baseline findings |",
-        "| --- | --- |",
+        f"| {sev} | {baseline_counts.get(sev, 0)} | {added_counts.get(sev, 0)} | {removed_counts.get(sev, 0)} |"
+        for sev in order
     ]
-    lines += [f"| {sev} | {baseline_counts.get(sev, 0)} |" for sev in order]
 
     lines += ["", f"Baseline: **{baseline_tier}**  •  Blocking policy: **{'enabled' if result['blocking_enabled'] else 'disabled'}** (threshold `{result['threshold']}`)"]
     if result.get("check_run_url"):
@@ -94,6 +92,7 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
     parser.add_argument("--pr-number", required=True, type=int)
     parser.add_argument("--result", required=True, help="Path to apply_policy.py's result JSON")
     parser.add_argument("--baseline-findings", required=True, help="Path to the baseline findings JSON diff_findings.py compared against")
+    parser.add_argument("--removed-findings", required=True, help="Path to diff_findings.py's --removed-out JSON (findings resolved by this PR)")
     parser.add_argument("--baseline-tier", required=True, help="Human-readable description of which baseline tier was used")
     args = parser.parse_args()
 
@@ -106,8 +105,13 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
         result = json.load(f)
     with open(args.baseline_findings) as f:
         baseline_findings = json.load(f)
+    with open(args.removed_findings) as f:
+        removed_findings = json.load(f)
 
-    body = render_body(result, args.baseline_tier, counts_by_severity(baseline_findings))
+    body = render_body(
+        result, args.baseline_tier,
+        counts_by_severity(baseline_findings), counts_by_severity(removed_findings),
+    )
 
     existing_id = find_existing_comment(owner, repo, args.pr_number, token)
     if existing_id:

@@ -235,8 +235,10 @@ jobs:
             --baseline "${{ steps.baseline-findings.outputs.path }}" \
             --head "${{ steps.head-scan.outputs.findings-json }}" \
             --changed-files changed-files.txt \
-            --out new-findings.json
+            --out new-findings.json \
+            --removed-out removed-findings.json
           echo "new-findings=new-findings.json" >> "$GITHUB_OUTPUT"
+          echo "removed-findings=removed-findings.json" >> "$GITHUB_OUTPUT"
 
       - name: Apply blocking policy
         id: policy
@@ -286,6 +288,7 @@ jobs:
             --pr-number "$PR_NUMBER" \
             --result policy-result.json \
             --baseline-findings "${{ steps.baseline-findings.outputs.path }}" \
+            --removed-findings "${{ steps.diff.outputs.removed-findings }}" \
             --baseline-tier "${{ steps.baseline.outputs.tier }}"
 
       - name: Tear down ephemeral SonarQube stack
