@@ -175,8 +175,7 @@ path, the blocking-job-failure path, and tier a artifact-based baseline
 resolution have all run end-to-end. Exercising tier a live caught a real bug
 on first try: the artifact download's redirect to blob storage rejected a
 forwarded GitHub `Authorization` header with a 401 (fixed - see
-`find_baseline_artifact.py`). Tier b hasn't been exercised against a real PR
-yet - see the test procedure doc for how to set that up deliberately.
+`find_baseline_artifact.py`).
 
 Artifact retention defaults to 90 days (`artifact-retention-days` input on
 `sonar-baseline.yml`) - no reason surfaced to deviate from that.
