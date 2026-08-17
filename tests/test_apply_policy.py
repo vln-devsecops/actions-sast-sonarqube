@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+import apply_policy
 from apply_policy import (
     ANNOTATION_LEVEL,
     SEVERITY_ORDER,
@@ -9,6 +10,7 @@ from apply_policy import (
     batch,
     build_summary,
     counts_by_severity,
+    main,
     severity_at_least,
     severity_of,
     to_annotation,
@@ -160,3 +162,65 @@ def test_batch_splits_into_chunks_of_at_most_size(count, size, expected_lengths)
     result = batch(items, size)
     assert [len(chunk) for chunk in result] == expected_lengths
     assert [x for chunk in result for x in chunk] == items
+
+
+def test_main_writes_result_out_even_when_check_run_publication_fails(tmp_path, monkeypatch):
+    """--result-out is documented as always written, even when publishing the
+    Check Run itself fails (e.g. the read-only GITHUB_TOKEN a fork PR gets).
+    That used to not hold: the write happened after create_check_run(), so an
+    API failure there skipped it entirely, and a later `if: always()` step
+    reading the file died with FileNotFoundError instead of the real error."""
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([{"rule": "r", "path": "a.py", "line": 1, "severity": "MINOR", "message": "m"}]))
+
+    def boom(*args, **kwargs):
+        raise SystemExit("GitHub API POST .../check-runs failed: HTTP 403")
+
+    monkeypatch.setattr(apply_policy, "create_check_run", boom)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        main()
+
+    assert result_path.exists()
+    result = json.loads(result_path.read_text())
+    assert result["check_run_url"] is None
+    assert result["total_new_findings"] == 1
+
+
+def test_main_result_out_gets_the_check_run_url_on_success(tmp_path, monkeypatch):
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))
+
+    monkeypatch.setattr(
+        apply_policy, "create_check_run",
+        lambda *a, **k: {"html_url": "https://example.com/run/1"},
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+        ],
+    )
+
+    main()
+
+    result = json.loads(result_path.read_text())
+    assert result["check_run_url"] == "https://example.com/run/1"
