@@ -62,6 +62,21 @@ def test_diff_empty_baseline_means_everything_is_new():
     assert diff([], head) == head
 
 
+def test_diff_is_symmetric_for_resolved_findings():
+    """diff(head, baseline) - arguments swapped from the usual new-findings
+    call - gives findings present in baseline but no longer in head, i.e.
+    resolved findings. main() relies on this instead of a separate
+    resolved-findings implementation."""
+    baseline = [
+        make_finding(rule="python:S1", hash="h1"),
+        make_finding(rule="python:S2", hash="h2"),
+    ]
+    head = [make_finding(rule="python:S1", hash="h1")]  # S2 was fixed
+    resolved = diff(head, baseline)
+    assert len(resolved) == 1
+    assert resolved[0]["rule"] == "python:S2"
+
+
 def test_filter_by_changed_files_keeps_only_touched_paths():
     findings = [
         make_finding(path="python/app.py"),
@@ -129,3 +144,48 @@ def test_main_applies_changed_files_filter_end_to_end(tmp_path, monkeypatch):
 
     result = json.loads(out_path.read_text())
     assert [f["path"] for f in result] == ["python/app.py"]
+
+
+def test_main_writes_removed_findings_when_requested(tmp_path, monkeypatch):
+    baseline_path = tmp_path / "baseline.json"
+    head_path = tmp_path / "head.json"
+    out_path = tmp_path / "new.json"
+    removed_out_path = tmp_path / "removed.json"
+
+    baseline_path.write_text(
+        json.dumps([make_finding(rule="python:S1", hash="h1"), make_finding(rule="python:S2", hash="h2")])
+    )
+    head_path.write_text(json.dumps([make_finding(rule="python:S1", hash="h1")]))  # S2 resolved
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "diff_findings.py",
+            "--baseline", str(baseline_path),
+            "--head", str(head_path),
+            "--out", str(out_path),
+            "--removed-out", str(removed_out_path),
+        ],
+    )
+    main()
+
+    removed = json.loads(removed_out_path.read_text())
+    assert len(removed) == 1
+    assert removed[0]["rule"] == "python:S2"
+
+
+def test_main_does_not_write_removed_findings_when_not_requested(tmp_path, monkeypatch):
+    """--removed-out is optional - main() must not write (or require) a
+    removed-findings file when the caller didn't ask for one."""
+    baseline_path = tmp_path / "baseline.json"
+    head_path = tmp_path / "head.json"
+    out_path = tmp_path / "new.json"
+
+    baseline_path.write_text(json.dumps([make_finding(hash="h1")]))
+    head_path.write_text(json.dumps([make_finding(hash="h1")]))
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["diff_findings.py", "--baseline", str(baseline_path), "--head", str(head_path), "--out", str(out_path)],
+    )
+    main()  # must not raise
