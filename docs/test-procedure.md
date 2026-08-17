@@ -134,8 +134,8 @@ of edit is easy to make by hand when testing.)
 ## 6. Blocking policy
 
 Introduce a change that trips a MAJOR-or-above rule (or reuse the existing
-findings already in `fixtures/`, which trip 4 MAJOR-or-above findings by
-design) in a test PR. Expect:
+findings already in `fixtures/`, which trip 5 MAJOR-or-above findings by
+design, including one Security Hotspot) in a test PR. Expect:
 
 - `pr-scan` job conclusion: `failure`
 - Check Run `sonarqube-community/new-findings`: conclusion `failure`
