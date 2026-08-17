@@ -174,17 +174,17 @@ in `ci.yml`. Network/CLI glue is deliberately excluded from that gate and
 validated live instead, the same way the rest of the pipeline is.
 
 The full pipeline (scan → fetch → diff → policy) has been exercised against
-real PRs twice, beyond the local ephemeral-instance run (`fixtures/` baseline
-vs. a modified "head" copy - hash-based matching correctly excluded
+real PRs, beyond the local ephemeral-instance run (`fixtures/` baseline vs. a
+modified "head" copy - hash-based matching correctly excluded
 shifted-but-unchanged findings and surfaced the one genuinely new one):
 
-- PR #1 exercised the fallback baseline-resolution path (no artifact existed
-  yet for a first-ever PR) and the blocking-job-failure path (`fixtures/`
-  itself trips 5 findings, 4 of them MAJOR-or-above).
-- PR #4 exercised tier a artifact-based baseline resolution end-to-end, once
-  a baseline artifact from PR #1's merge existed to resolve against. That run
-  caught a real bug on first exercise: the artifact download's redirect to
-  blob storage rejected a forwarded GitHub `Authorization` header with a 401.
+- The fallback baseline-resolution path (no artifact exists yet, e.g. a
+  first-ever PR) and the blocking-job-failure path (`fixtures/` itself trips
+  5 findings, 4 of them MAJOR-or-above) have both run end-to-end.
+- Tier a artifact-based baseline resolution has run end-to-end too. Exercising
+  it live caught a real bug on first try: the artifact download's redirect to
+  blob storage rejected a forwarded GitHub `Authorization` header with a 401
+  (fixed - see `find_baseline_artifact.py`).
 
 Not yet exercised against a real PR: tier b artifact-based baseline
 resolution specifically (needs the merge-base artifact to be missing or
