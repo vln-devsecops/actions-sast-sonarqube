@@ -58,12 +58,27 @@ jobs:
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           TARGET_HEAD_SHA: ${{ github.event.pull_request.base.sha }}
+          PROJECT_BASE_DIR: ${{ inputs.project-base-dir }}
         run: |
           merge_base="$(git merge-base "origin/${BASE_REF}" HEAD)"
           echo "merge-base=${merge_base}" >> "$GITHUB_OUTPUT"
           echo "target-head-sha=${TARGET_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-          git diff --name-only "${merge_base}..HEAD" > changed-files.txt
-          echo "Files touched by this PR:"
+
+          # SonarQube reports each finding's path relative to
+          # project-base-dir, not the repo root - but `git diff` paths are
+          # always repo-root-relative. Scope+strip to project-base-dir so
+          # diff_findings.py's --changed-files filter is comparing the same
+          # path space; otherwise, whenever project-base-dir isn't the repo
+          # root, every finding looks "untouched" and gets dropped.
+          base_dir="${PROJECT_BASE_DIR#./}"
+          base_dir="${base_dir%/}"
+          if [[ -z "$base_dir" || "$base_dir" == "." ]]; then
+            git diff --name-only "${merge_base}..HEAD" > changed-files.txt
+          else
+            git diff --name-only "${merge_base}..HEAD" -- "$base_dir" \
+              | sed "s#^${base_dir}/##" > changed-files.txt
+          fi
+          echo "Files touched by this PR (relative to project-base-dir):"
           cat changed-files.txt
 
       # This reusable workflow is meant to be called by other repos, so it
@@ -164,7 +179,7 @@ jobs:
           sonar-host-url: http://localhost:9000
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: ${{ inputs.project-key }}-fallback-base
-          project-base-dir: .baseline-checkout
+          project-base-dir: .baseline-checkout/${{ inputs.project-base-dir }}
 
       - name: Scan PR head
         id: head-scan
