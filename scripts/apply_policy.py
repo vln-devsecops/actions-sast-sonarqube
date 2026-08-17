@@ -61,6 +61,8 @@ def gh_api(method, url, token, body=None):  # pragma: no cover - network I/O, va
 def to_annotation(finding):
     line = finding.get("line") or 1
     title = f"{finding['rule']} ({finding['severity']})"
+    if finding.get("type") == "SECURITY_HOTSPOT":
+        title = f"Security Hotspot: {title}"
     return {
         "path": finding["path"],
         "start_line": line,

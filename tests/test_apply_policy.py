@@ -43,6 +43,19 @@ def test_to_annotation_shapes_finding_correctly():
     }
 
 
+def test_to_annotation_prefixes_security_hotspots():
+    finding = {
+        "path": "a.py", "line": 1, "rule": "python:S4790", "severity": "MAJOR",
+        "message": "", "type": "SECURITY_HOTSPOT",
+    }
+    assert to_annotation(finding)["title"] == "Security Hotspot: python:S4790 (MAJOR)"
+
+
+def test_to_annotation_does_not_prefix_issues():
+    finding = {"path": "a.py", "line": 1, "rule": "python:S1", "severity": "MAJOR", "message": "", "type": "ISSUE"}
+    assert to_annotation(finding)["title"] == "python:S1 (MAJOR)"
+
+
 def test_to_annotation_defaults_missing_line_to_1():
     finding = {"path": "a.py", "line": None, "rule": "python:S1", "severity": "MINOR", "message": ""}
     ann = to_annotation(finding)
