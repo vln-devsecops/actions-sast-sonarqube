@@ -1,4 +1,6 @@
+import http.server
 import json
+import threading
 
 import pytest
 
@@ -10,6 +12,8 @@ from apply_policy import (
     batch,
     build_summary,
     counts_by_severity,
+    create_check_run,
+    gh_api,
     main,
     severity_at_least,
     severity_of,
@@ -224,3 +228,123 @@ def test_main_result_out_gets_the_check_run_url_on_success(tmp_path, monkeypatch
 
     result = json.loads(result_path.read_text())
     assert result["check_run_url"] == "https://example.com/run/1"
+
+
+def _local_http_server(status_code):
+    """A real local HTTP server returning `status_code` for every request,
+    used to exercise gh_api's actual urllib error handling rather than
+    mocking it away."""
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _respond(self):
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            body = json.dumps({"message": "denied"}).encode()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = _respond
+        do_POST = _respond
+        do_PATCH = _respond
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def test_gh_api_raises_on_403_by_default():
+    """The ordinary case: a 403 is a genuine error and should stop the job,
+    not be silently swallowed."""
+    server = _local_http_server(403)
+    try:
+        with pytest.raises(SystemExit):
+            gh_api("POST", f"http://127.0.0.1:{server.server_port}/", "token")
+    finally:
+        server.shutdown()
+
+
+def test_gh_api_returns_none_on_403_when_forbidden_allowed():
+    """GitHub downgrades GITHUB_TOKEN to read-only for a pull_request event
+    from a fork, regardless of the permissions: block a workflow requests -
+    so a write call 403ing there is expected, not a genuine error, and must
+    degrade gracefully rather than crash the whole job."""
+    server = _local_http_server(403)
+    try:
+        result = gh_api("POST", f"http://127.0.0.1:{server.server_port}/", "token", allow_forbidden=True)
+    finally:
+        server.shutdown()
+    assert result is None
+
+
+def test_gh_api_returns_none_on_404_when_forbidden_allowed():
+    server = _local_http_server(404)
+    try:
+        result = gh_api("POST", f"http://127.0.0.1:{server.server_port}/", "token", allow_forbidden=True)
+    finally:
+        server.shutdown()
+    assert result is None
+
+
+def test_gh_api_still_raises_on_other_errors_when_forbidden_allowed():
+    """allow_forbidden is specifically about 403/404 - a 500 is still a
+    genuine failure and must not be swallowed."""
+    server = _local_http_server(500)
+    try:
+        with pytest.raises(SystemExit):
+            gh_api("POST", f"http://127.0.0.1:{server.server_port}/", "token", allow_forbidden=True)
+    finally:
+        server.shutdown()
+
+
+def test_create_check_run_returns_none_when_creation_is_forbidden(monkeypatch):
+    """A fork PR's read-only token means the creating POST 403s - gh_api
+    already surfaces that as None (tested above); create_check_run must
+    propagate it as None too rather than crashing on check_run["id"], and
+    must not attempt any PATCH follow-up calls with nothing to patch."""
+    patch_calls = []
+    monkeypatch.setattr(
+        apply_policy, "gh_api",
+        lambda method, url, token, body=None, allow_forbidden=False: (
+            patch_calls.append(method) if method == "PATCH" else None
+        ),
+    )
+    result = create_check_run(
+        "o/r", "token", "sha", "check-name", "success", "summary",
+        [{"path": "a.py", "start_line": 1, "end_line": 1, "annotation_level": "notice", "title": "t", "message": "m"}],
+    )
+    assert result is None
+    assert patch_calls == []
+
+
+def test_main_handles_a_completely_unpublishable_check_run(tmp_path, monkeypatch):
+    """End-to-end fork-PR simulation: create_check_run returns None (as it
+    does when GitHub Actions downgrades GITHUB_TOKEN to read-only for a
+    pull_request event from a fork). main() must still write --result-out
+    with check_run_url: None instead of crashing on check_run.get(...)."""
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([{"rule": "r", "path": "a.py", "line": 1, "severity": "MAJOR", "message": "m"}]))
+
+    monkeypatch.setattr(apply_policy, "create_check_run", lambda *a, **k: None)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        main()  # still blocks per policy (MAJOR finding), even unpublished
+
+    result = json.loads(result_path.read_text())
+    assert result["check_run_url"] is None
+    assert result["blocked"] is True

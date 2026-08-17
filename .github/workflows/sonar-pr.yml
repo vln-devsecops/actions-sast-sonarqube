@@ -245,17 +245,37 @@ jobs:
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          python3 .sast-sonarqube/scripts/apply_policy.py \
-            --findings "${{ steps.diff.outputs.new-findings }}" \
-            --threshold "${{ inputs.severity-threshold }}" \
-            --blocking "${{ inputs.blocking }}" \
-            --repo "$REPO" \
-            --sha "$HEAD_SHA" \
-            --check-name "${{ inputs.check-name }}" \
-            --result-out policy-result.json
+          set -o pipefail
+          # GitHub downgrades GITHUB_TOKEN to read-only for a pull_request
+          # event from a fork, regardless of `permissions:` above - so on a
+          # fork PR, apply_policy.py can't publish a Check Run (it degrades
+          # to that gracefully, see gh_api's allow_forbidden) and the "Post
+          # PR summary comment" step below is skipped outright. The job
+          # summary is the one place findings are guaranteed to be visible
+          # either way, so capture apply_policy.py's own summary there too,
+          # not just the baseline-resolution tier.
+          {
+            echo "### SonarQube Community blocking policy"
+            python3 .sast-sonarqube/scripts/apply_policy.py \
+              --findings "${{ steps.diff.outputs.new-findings }}" \
+              --threshold "${{ inputs.severity-threshold }}" \
+              --blocking "${{ inputs.blocking }}" \
+              --repo "$REPO" \
+              --sha "$HEAD_SHA" \
+              --check-name "${{ inputs.check-name }}" \
+              --result-out policy-result.json
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Post PR summary comment
-        if: always() && inputs.post-pr-comment && steps.diff.outcome == 'success'
+        # Posting a comment needs pull-requests: write, which - like
+        # checks: write above - GitHub downgrades to read-only for a
+        # pull_request event from a fork regardless of the permissions:
+        # block this workflow requests. Skip outright rather than let it
+        # 403: the job summary (see the policy step above) is where a fork
+        # PR's findings are reported instead.
+        if: >-
+          always() && inputs.post-pr-comment && steps.diff.outcome == 'success'
+          && github.event.pull_request.head.repo.full_name == github.repository
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}

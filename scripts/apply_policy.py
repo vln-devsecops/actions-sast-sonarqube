@@ -8,9 +8,10 @@ by diff_findings.py - not SonarQube's Quality Gate, which assumes persisted
 server-side baseline/period state this action deliberately doesn't keep.
 
 Always writes --result-out, even when it goes on to exit non-zero, and even
-when publishing the Check Run itself fails (e.g. a fork PR's read-only
-GITHUB_TOKEN), so a subsequent workflow step (e.g. posting a PR summary
-comment) can read the outcome with `if: always()`.
+when the Check Run can't be published at all (e.g. a fork PR's read-only
+GITHUB_TOKEN - see gh_api's allow_forbidden), so a subsequent workflow step
+(e.g. posting a PR summary comment) can read the outcome with
+`if: always()`.
 """
 import argparse
 import json
@@ -58,7 +59,13 @@ def severity_at_least(severity, threshold):
     return SEVERITY_ORDER.index(severity) >= SEVERITY_ORDER.index(threshold)
 
 
-def gh_api(method, url, token, body=None):  # pragma: no cover - network I/O, validated live
+def gh_api(method, url, token, body=None, allow_forbidden=False):  # pragma: no cover - network I/O, validated live
+    """allow_forbidden=True treats a 403/404 as "couldn't publish, not a
+    genuine error" rather than a fatal one - GitHub downgrades GITHUB_TOKEN
+    to read-only for a pull_request event from a fork, regardless of the
+    permissions: block a workflow requests, so publishing a Check Run on a
+    fork PR 403s by design, not by misconfiguration. Returns None in that
+    case instead of raising, so the caller can degrade gracefully."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {token}")
@@ -71,6 +78,14 @@ def gh_api(method, url, token, body=None):  # pragma: no cover - network I/O, va
             return json.load(resp)
     except urllib.error.HTTPError as e:
         body_text = e.read().decode(errors="replace")
+        if allow_forbidden and e.code in (403, 404):
+            print(
+                f"warning: {method} {url} returned HTTP {e.code}; this is expected for a "
+                f"pull request from a fork, where GITHUB_TOKEN is read-only. Findings are "
+                f"still reported in the job step summary.",
+                file=sys.stderr,
+            )
+            return None
         raise SystemExit(f"GitHub API {method} {url} failed: HTTP {e.code}\n{body_text}")
 
 
@@ -132,6 +147,10 @@ def batch(items, size):
 
 
 def create_check_run(repo, token, sha, check_name, conclusion, summary, annotations):  # pragma: no cover - network I/O, validated live
+    """Returns None (rather than raising) if the creating POST 403/404s -
+    see gh_api's allow_forbidden. A fork PR's read-only token means this is
+    the expected outcome there, not an error condition the caller should
+    treat as fatal."""
     owner, name = repo.split("/", 1)
     base_url = f"https://api.github.com/repos/{owner}/{name}/check-runs"
 
@@ -151,7 +170,10 @@ def create_check_run(repo, token, sha, check_name, conclusion, summary, annotati
                 "annotations": batches[0],
             },
         },
+        allow_forbidden=True,
     )
+    if check_run is None:
+        return None
 
     check_run_id = check_run["id"]
     update_url = f"{base_url}/{check_run_id}"
@@ -219,7 +241,8 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
         check_run = create_check_run(
             args.repo, token, args.sha, args.check_name, conclusion, summary, annotations
         )
-        result["check_run_url"] = check_run.get("html_url")
+        if check_run is not None:
+            result["check_run_url"] = check_run.get("html_url")
     finally:
         write_result(args.result_out, result)
 
