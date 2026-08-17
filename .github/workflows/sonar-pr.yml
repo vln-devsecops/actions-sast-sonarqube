@@ -285,6 +285,7 @@ jobs:
             --repo "$REPO" \
             --pr-number "$PR_NUMBER" \
             --result policy-result.json \
+            --baseline-findings "${{ steps.baseline-findings.outputs.path }}" \
             --baseline-tier "${{ steps.baseline.outputs.tier }}"
 
       - name: Tear down ephemeral SonarQube stack
