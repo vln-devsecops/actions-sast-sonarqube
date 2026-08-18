@@ -26,13 +26,16 @@ docker-compose.ephemeral.yml   SonarQube Community Build + Postgres, both
 
 action.yml                     Composite action: "run one scan against a
                                 checked-out directory, return normalized
-                                findings JSON." Used by both workflows below
-                                so scan logic lives in exactly one place.
+                                findings JSON plus a human-readable Markdown
+                                report of every finding's exact location."
+                                Used by both workflows below so scan logic
+                                lives in exactly one place.
 
 .github/workflows/
   sonar-baseline.yml           Reusable workflow (workflow_call). Scans HEAD
                                 of a push to a baseline branch, uploads
-                                findings as artifact "sonar-baseline-<sha>".
+                                findings (JSON) and the report (Markdown) as
+                                artifact "sonar-baseline-<sha>".
 
   sonar-pr.yml                 Reusable workflow (workflow_call). Resolves a
                                 baseline (see below), scans PR HEAD, diffs,
@@ -89,6 +92,20 @@ introduces a second, brand-new violation of a rule on a line whose content
 happens to exactly match an existing baseline violation of that same rule in
 that file, the new one won't be flagged. This is a rare edge case in
 practice.
+
+### Findings report
+
+The SonarQube instance this action spins up is ephemeral - torn down at the
+end of the job - so once it finishes there's no SonarQube UI left to browse
+for exact issue locations. `action.yml` renders one alongside the findings
+JSON on every scan (`scripts/render_findings_report.py`): a Markdown table
+of every finding with its rule, severity, and exact `path:line`, covering
+the full current finding set rather than just what changed in one PR (Check
+Run annotations already cover new findings inline-on-diff for that).
+
+`sonar-baseline.yml` bundles it into the `sonar-baseline-<sha>` artifact
+alongside the JSON. `sonar-pr.yml` uploads the PR head scan's report as its
+own artifact and links it from the job's step summary.
 
 ### Blocking policy
 

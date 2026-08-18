@@ -89,10 +89,18 @@ jobs:
           project-base-dir: ${{ inputs.project-base-dir }}
 
       - name: Upload baseline findings artifact
+        # Bundles the machine-readable JSON (what sonar-pr.yml's baseline
+        # resolution actually reads back - see find_baseline_artifact.py)
+        # with the human-readable report, so anyone browsing this run's
+        # Artifacts section can see exact finding locations without
+        # re-running the scan (the SonarQube instance itself is torn down
+        # at the end of this job).
         uses: actions/upload-artifact@v7
         with:
           name: sonar-baseline-${{ github.sha }}
-          path: ${{ steps.scan.outputs.findings-json }}
+          path: |
+            ${{ steps.scan.outputs.findings-json }}
+            ${{ steps.scan.outputs.findings-report }}
           retention-days: ${{ inputs.artifact-retention-days }}
 
       - name: Tear down ephemeral SonarQube stack

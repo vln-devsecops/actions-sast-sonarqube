@@ -30,6 +30,15 @@ outputs:
   findings-json:
     description: Path to the normalized findings JSON file produced by this scan.
     value: ${{ steps.fetch.outputs.findings-json }}
+  findings-report:
+    description: >-
+      Path to a human-readable Markdown report of every finding, with exact
+      locations (path:line) - see scripts/render_findings_report.py. Exists
+      because the SonarQube instance this action spins up is ephemeral, so
+      once the job ends there's no SonarQube UI left to browse for issue
+      detail; callers are expected to upload this as a build artifact or
+      surface it in a job summary.
+    value: ${{ steps.report.outputs.findings-report }}
 
 runs:
   using: composite
@@ -65,3 +74,17 @@ runs:
           --project-key "${{ inputs.project-key }}" \
           --out "$out_file"
         echo "findings-json=$out_file" >> "$GITHUB_OUTPUT"
+
+    - name: Render findings report
+      id: report
+      shell: bash
+      run: |
+        set -euo pipefail
+        out_dir="${RUNNER_TEMP:-/tmp}/sonar-findings"
+        mkdir -p "$out_dir"
+        report_file="$out_dir/${{ inputs.project-key }}-report.md"
+        python3 "${{ github.action_path }}/scripts/render_findings_report.py" \
+          --findings "${{ steps.fetch.outputs.findings-json }}" \
+          --project-key "${{ inputs.project-key }}" \
+          --out "$report_file"
+        echo "findings-report=$report_file" >> "$GITHUB_OUTPUT"

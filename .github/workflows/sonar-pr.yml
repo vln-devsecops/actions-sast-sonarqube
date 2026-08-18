@@ -32,6 +32,15 @@ on:
         description: Name of the GitHub Check Run this workflow creates.
         type: string
         default: sonarqube-community/new-findings
+      findings-report-retention-days:
+        description: >-
+          Retention period for the uploaded findings-report artifact (the
+          full current finding set, with exact locations - see
+          scripts/render_findings_report.py). Shorter than a baseline
+          artifact's default retention since this is a per-PR debugging aid,
+          not something later runs resolve by name.
+        type: number
+        default: 30
 
 jobs:
   pr-scan:
@@ -211,6 +220,30 @@ jobs:
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: ${{ inputs.project-key }}
           project-base-dir: ${{ inputs.project-base-dir }}
+
+      # The full current finding set (not just this PR's new findings, which
+      # the Check Run annotations already cover inline-on-diff) - the
+      # SonarQube instance is ephemeral and torn down at the end of this
+      # job, so this is the durable place to see exact locations without
+      # re-running the scan. `if: always()` so it still uploads even if a
+      # later step (diff, policy) fails - the report itself is already
+      # complete once the scan succeeds.
+      - name: Upload PR head findings report
+        id: upload-report
+        if: always() && steps.head-scan.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: sonar-pr-${{ github.event.pull_request.number }}-findings-report
+          path: ${{ steps.head-scan.outputs.findings-report }}
+          retention-days: ${{ inputs.findings-report-retention-days }}
+
+      - name: Record findings report link
+        if: always() && steps.upload-report.outcome == 'success'
+        run: |
+          {
+            echo "### SonarQube Community findings report"
+            echo "Full current finding set, with exact locations: ${{ steps.upload-report.outputs.artifact-url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Resolve baseline findings file
         id: baseline-findings
