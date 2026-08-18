@@ -41,6 +41,14 @@ def test_select_artifact_skips_expired_even_if_only_candidate_with_matching_name
     assert select_artifact(artifacts, "sonar-baseline-abc123") is None
 
 
+def test_select_artifact_tolerates_missing_fields():
+    """A listing entry missing `expired`, `name`, or `created_at` must not
+    raise - select_artifact()'s whole contract is "pick one or return None"."""
+    matching_but_bare = {"name": "sonar-baseline-abc123"}
+    assert select_artifact([matching_but_bare], "sonar-baseline-abc123") == matching_but_bare
+    assert select_artifact([{}], "sonar-baseline-abc123") is None
+
+
 def test_zip_extraction_cannot_escape_the_destination_directory(tmp_path):
     """download_and_extract() relies on zipfile.extractall() sanitizing member
     names rather than validating them itself. That reads like a "Zip Slip"

@@ -25,25 +25,46 @@ def gh_api_get(url, token):  # pragma: no cover - network I/O, validated live
     return gh_request("GET", url, token)
 
 
+ARTIFACTS_PER_PAGE = 100
+# Guard against an unbounded loop if the API ever returns a full page
+# forever; 20 pages x 100 is far beyond any plausible number of artifacts
+# sharing one content-addressed name.
+MAX_ARTIFACT_PAGES = 20
+
+
 def select_artifact(artifacts, name):
     """Pick the artifact to use from a listing API response's `artifacts`
     array: exact name match, not expired, newest first."""
-    candidates = [a for a in artifacts if a["name"] == name and not a["expired"]]
+    candidates = [
+        a for a in artifacts
+        if a.get("name") == name and not a.get("expired", False)
+    ]
     if not candidates:
         return None
     # Exact-name matches for a content-addressed artifact name should never
     # collide across runs, but if they somehow do, prefer the newest.
-    candidates.sort(key=lambda a: a["created_at"], reverse=True)
+    # created_at is ISO 8601 UTC, so a lexicographic sort is chronological.
+    candidates.sort(key=lambda a: a.get("created_at", ""), reverse=True)
     return candidates[0]
 
 
 def find_artifact(owner, repo, name, token):  # pragma: no cover - network I/O, validated live
-    url = (
-        f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
-        f"?name={urllib.parse.quote(name)}&per_page=100"
-    )
-    data = gh_api_get(url, token)
-    return select_artifact(data.get("artifacts", []), name)
+    """Search every page of the name-filtered listing, not just the first.
+    A valid-but-unseen baseline is indistinguishable from no baseline at the
+    call site, so an incomplete search silently changes which baseline the
+    PR diff is computed against."""
+    artifacts = []
+    for page in range(1, MAX_ARTIFACT_PAGES + 1):
+        url = (
+            f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
+            f"?name={urllib.parse.quote(name)}"
+            f"&per_page={ARTIFACTS_PER_PAGE}&page={page}"
+        )
+        page_artifacts = gh_api_get(url, token).get("artifacts", [])
+        artifacts.extend(page_artifacts)
+        if len(page_artifacts) < ARTIFACTS_PER_PAGE:
+            break
+    return select_artifact(artifacts, name)
 
 
 def download_and_extract(artifact, token, dest_dir):  # pragma: no cover - network I/O, validated live
