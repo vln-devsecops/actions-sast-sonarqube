@@ -147,7 +147,7 @@ on:
 jobs:
   baseline:
     if: github.event_name == 'push'
-    uses: vln-devsecops/actions-sast-sonarqube/.github/workflows/sonar-baseline.yml@main
+    uses: vln-devsecops/actions-sast-sonarqube/.github/workflows/sonar-baseline.yml@v1
     permissions:
       contents: read
     with:
@@ -155,7 +155,7 @@ jobs:
 
   pr-scan:
     if: github.event_name == 'pull_request'
-    uses: vln-devsecops/actions-sast-sonarqube/.github/workflows/sonar-pr.yml@main
+    uses: vln-devsecops/actions-sast-sonarqube/.github/workflows/sonar-pr.yml@v1
     permissions:
       contents: read
       checks: write
@@ -163,8 +163,11 @@ jobs:
       actions: read
 ```
 
-`@main` above is a placeholder: once this repo adopts release-please (or
-equivalent) tagging, pin consumers to a version tag (e.g. `@v1`) instead.
+Pin to a version tag, not `@main` or a commit SHA: this repo tags releases
+via [release-please](https://github.com/googleapis/release-please). `@v1`
+tracks the newest `1.x.y` release (picks up minor and patch updates); `@v1.2`
+tracks the newest `1.2.z` patch only; an exact `@v1.2.3` never moves. Prefer
+`@v1` unless you need tighter pinning.
 
 **Fork PRs**: GitHub downgrades `GITHUB_TOKEN` to read-only for a
 `pull_request` event from a fork, regardless of the `permissions:` block
