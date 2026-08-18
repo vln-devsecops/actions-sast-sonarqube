@@ -31,13 +31,36 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PAGE_SIZE = 500
+from diff_findings import finding_key
+
+PAGE_SIZE = 500  # documented maximum for `ps` on api/issues/search and api/hotspots/search
 # Only issues a developer still needs to act on - resolved/closed issues
 # (fixed, false positive, won't fix, ...) are not findings.
 OPEN_STATUSES = "OPEN,CONFIRMED,REOPENED"
 # Only hotspots still awaiting a human decision - REVIEWED ones (resolution
 # FIXED/SAFE/ACKNOWLEDGED) are, like resolved issues, not findings.
 HOTSPOT_STATUS = "TO_REVIEW"
+
+# Index-backed search endpoints have historically refused to page beyond a
+# fixed offset (p * ps), returning an error rather than more results. It is
+# not in the current API docs and may no longer apply, but paging deep
+# enough to find out would fail a whole baseline run - so treat the ceiling
+# as real and partition around it. Costs one comparison on the happy path.
+MAX_SEARCH_OFFSET = 10_000
+MAX_PAGES = MAX_SEARCH_OFFSET // PAGE_SIZE
+
+# Disjoint dimensions to split an over-large issues query along, most
+# selective first. `severities` partitions the issue set 5 ways with no
+# overlap and no gaps; `types` adds a further 3x if a single severity is
+# still too large.
+ISSUE_PARTITIONS = (
+    ("severities", ("INFO", "MINOR", "MAJOR", "CRITICAL", "BLOCKER")),
+    ("types", ("BUG", "VULNERABILITY", "CODE_SMELL")),
+)
+# api/hotspots/search has no severity/type facets to partition on, and
+# `status` is already pinned to TO_REVIEW. If a project ever exceeds the
+# pageable window in hotspots alone, the next dimension is `files`.
+HOTSPOT_PARTITIONS = ()
 
 # SonarQube gives hotspots no severity of their own, just a
 # vulnerabilityProbability. There's no canonical mapping onto the legacy
@@ -134,36 +157,113 @@ def normalize_hotspot(hotspot, project_key):
     }
 
 
-def _fetch_paginated(host, token, path, base_params, items_key):  # pragma: no cover - network I/O, validated live
+def _fetch_pages(host, token, path, params, items_key):  # pragma: no cover - network I/O, validated live
+    """Page through a single query up to the offset ceiling.
+
+    Returns (items, total). `total` is the server's count for the whole
+    query, which may exceed len(items) when the ceiling was hit - the caller
+    decides how to handle that rather than silently returning a partial
+    set.
+    """
     items = []
-    page = 1
-    while True:
-        data = api_get(host, token, path, {**base_params, "ps": PAGE_SIZE, "p": page})
+    total = 0
+    for page in range(1, MAX_PAGES + 1):
+        data = api_get(host, token, path, {**params, "ps": PAGE_SIZE, "p": page})
         page_items = data.get(items_key, [])
         items.extend(page_items)
 
         paging = data.get("paging", {})
         total = paging.get("total", len(items))
-        page_size = paging.get("pageSize", PAGE_SIZE)
+        page_size = paging.get("pageSize", PAGE_SIZE) or PAGE_SIZE
         if not page_items or page * page_size >= total:
             break
-        page += 1
 
-    return items
+    return items, total
+
+
+def plan_partitions(total, fetched, partitions):
+    """Pure planning step for _fetch_exhaustive: decide what to do when a
+    query's paged results (`fetched` items) fall short of its reported
+    `total`.
+
+    Returns None when paging already got everything (fetched >= total) - no
+    partitioning needed. Otherwise returns (param, values, remaining), where
+    the caller should issue one sub-query per entry in `values` (each with
+    `param` set to that value), and `remaining` is what's left of
+    `partitions` for those sub-queries to split along further if they're
+    still too large. `values` is empty when no partitioning dimension is
+    left - the caller should accept the partial result rather than recurse.
+    """
+    if fetched >= total:
+        return None
+    if not partitions:
+        return ("", (), ())
+    (param, values), *rest = partitions
+    return (param, values, tuple(rest))
+
+
+def _fetch_exhaustive(host, token, path, params, items_key, partitions):  # pragma: no cover - network I/O, validated live
+    """Fetch every item for a query, splitting it along `partitions` when the
+    result set is too large to page through in one go."""
+    items, total = _fetch_pages(host, token, path, params, items_key)
+    plan = plan_partitions(total, len(items), partitions)
+    if plan is None:
+        return items
+
+    param, values, remaining = plan
+    if not values:
+        print(
+            f"warning: {path} returned {total} results for {params!r} but only "
+            f"{len(items)} could be paged through, and no further partitioning "
+            f"dimension is available. Findings may be incomplete.",
+            file=sys.stderr,
+        )
+        return items
+
+    print(
+        f"note: {path} has {total} results for {params!r}, beyond the pageable "
+        f"window - splitting the query by {param}.",
+        file=sys.stderr,
+    )
+    partitioned = []
+    for value in values:
+        partitioned.extend(
+            _fetch_exhaustive(host, token, path, {**params, param: value}, items_key, remaining)
+        )
+    return partitioned
+
+
+def _dedupe(findings):
+    """Guard against double-counting across partitioned sub-queries. The
+    partition dimensions (severity, type) are single-valued per issue so the
+    sub-queries are disjoint in principle, but this makes that guarantee
+    explicit rather than relying on it silently holding."""
+    seen = set()
+    deduped = []
+    for finding in findings:
+        key = finding_key(finding)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(finding)
+    return deduped
 
 
 def fetch_all(host, token, project_key):  # pragma: no cover - network I/O, validated live
-    issues = _fetch_paginated(
+    issues = _fetch_exhaustive(
         host, token, "/api/issues/search",
         {"componentKeys": project_key, "statuses": OPEN_STATUSES}, "issues",
+        ISSUE_PARTITIONS,
     )
-    hotspots = _fetch_paginated(
+    hotspots = _fetch_exhaustive(
         host, token, "/api/hotspots/search",
         {"project": project_key, "status": HOTSPOT_STATUS}, "hotspots",
+        HOTSPOT_PARTITIONS,
     )
-    return [normalize(i, project_key) for i in issues] + [
-        normalize_hotspot(h, project_key) for h in hotspots
-    ]
+    return _dedupe(
+        [normalize(i, project_key) for i in issues]
+        + [normalize_hotspot(h, project_key) for h in hotspots]
+    )
 
 
 def main():  # pragma: no cover - CLI glue over the above, validated live
