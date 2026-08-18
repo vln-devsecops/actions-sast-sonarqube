@@ -16,28 +16,11 @@ the existing comment instead of piling up a new one each time.
 import argparse
 import json
 import os
-import urllib.error
-import urllib.request
 
 from apply_policy import counts_by_severity
+from gh_client import request as gh_api
 
 MARKER = "<!-- sonarqube-community-action:pr-summary -->"
-
-
-def gh_api(method, url, token, body=None):  # pragma: no cover - network I/O, validated live
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.load(resp)
-    except urllib.error.HTTPError as e:
-        body_text = e.read().decode(errors="replace")
-        raise SystemExit(f"GitHub API {method} {url} failed: HTTP {e.code}\n{body_text}")
 
 
 def find_existing_comment(owner, repo, pr_number, token):  # pragma: no cover - network I/O, validated live

@@ -13,26 +13,16 @@ Prints "true" or "false" to stdout (nothing else) so a workflow step can do:
 """
 import argparse
 import io
-import json
 import os
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 import zipfile
+
+from gh_client import request as gh_request
 
 
 def gh_api_get(url, token):  # pragma: no cover - network I/O, validated live
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.load(resp)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")
-        raise SystemExit(f"GitHub API GET {url} failed: HTTP {e.code}\n{body}")
+    return gh_request("GET", url, token)
 
 
 def select_artifact(artifacts, name):
@@ -56,25 +46,8 @@ def find_artifact(owner, repo, name, token):  # pragma: no cover - network I/O, 
     return select_artifact(data.get("artifacts", []), name)
 
 
-class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
-    """`archive_download_url` 302s to a signed, short-lived blob-storage URL
-    that doesn't expect (and errors on) our GitHub Authorization header -
-    urllib forwards all original headers across a redirect by default, which
-    breaks the download with a 401 from the storage host, not GitHub."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if new_req is not None:
-            new_req.remove_header("Authorization")
-        return new_req
-
-
 def download_and_extract(artifact, token, dest_dir):  # pragma: no cover - network I/O, validated live
-    req = urllib.request.Request(artifact["archive_download_url"])
-    req.add_header("Authorization", f"Bearer {token}")
-    opener = urllib.request.build_opener(_StripAuthOnRedirect)
-    with opener.open(req, timeout=120) as resp:
-        blob = resp.read()
+    blob = gh_request("GET", artifact["archive_download_url"], token, timeout=120, raw=True)
     os.makedirs(dest_dir, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
         # This extractall() is NOT a "Zip Slip" path-traversal hole, despite
