@@ -102,6 +102,11 @@ jobs:
             ${{ steps.scan.outputs.findings-json }}
             ${{ steps.scan.outputs.findings-report }}
           retention-days: ${{ inputs.artifact-retention-days }}
+          # A baseline artifact is authoritative for every PR that resolves
+          # it by SHA, so publishing an empty one is worse than publishing
+          # none at all - the PR would diff against nothing and report every
+          # pre-existing finding as new. Fail the baseline run instead.
+          if-no-files-found: error
 
       - name: Tear down ephemeral SonarQube stack
         if: always()
