@@ -17,8 +17,8 @@ import argparse
 import json
 import os
 import sys
-import urllib.error
-import urllib.request
+
+from gh_client import request as gh_api
 
 # Legacy severity scale, low to high. Kept as the policy-relevant field
 # because SonarQube populates it for backward compatibility regardless of
@@ -57,36 +57,6 @@ def severity_at_least(severity, threshold):
     if severity not in SEVERITY_ORDER:
         severity = UNKNOWN_SEVERITY_FALLBACK
     return SEVERITY_ORDER.index(severity) >= SEVERITY_ORDER.index(threshold)
-
-
-def gh_api(method, url, token, body=None, allow_forbidden=False):  # pragma: no cover - network I/O, validated live
-    """allow_forbidden=True treats a 403/404 as "couldn't publish, not a
-    genuine error" rather than a fatal one - GitHub downgrades GITHUB_TOKEN
-    to read-only for a pull_request event from a fork, regardless of the
-    permissions: block a workflow requests, so publishing a Check Run on a
-    fork PR 403s by design, not by misconfiguration. Returns None in that
-    case instead of raising, so the caller can degrade gracefully."""
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.load(resp)
-    except urllib.error.HTTPError as e:
-        body_text = e.read().decode(errors="replace")
-        if allow_forbidden and e.code in (403, 404):
-            print(
-                f"warning: {method} {url} returned HTTP {e.code}; this is expected for a "
-                f"pull request from a fork, where GITHUB_TOKEN is read-only. Findings are "
-                f"still reported in the job step summary.",
-                file=sys.stderr,
-            )
-            return None
-        raise SystemExit(f"GitHub API {method} {url} failed: HTTP {e.code}\n{body_text}")
 
 
 def to_annotation(finding):
