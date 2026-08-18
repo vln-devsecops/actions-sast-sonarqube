@@ -36,13 +36,23 @@ print("".join(password))
 
 log() { echo "$@" >&2; }
 
+# SonarQube reports UP as soon as its web layer answers, but the compute
+# engine and any pending DB migration can still be settling - a request that
+# is accepted and then stalls would otherwise hang the whole job. Matches the
+# --max-time used in run_scan.sh and wait_for_sonarqube.sh.
+CURL_MAX_TIME=30
+
 log "Rotating default admin credential..."
-change_password_status="$(curl -fsS -o /dev/null -w '%{http_code}' \
-  -u 'admin:admin' \
-  -X POST "${HOST_URL}/api/users/change_password" \
-  --data-urlencode 'login=admin' \
-  --data-urlencode 'previousPassword=admin' \
-  --data-urlencode "password=${NEW_PASSWORD}")"
+# Credentials are passed via a --config file read from stdin rather than -u /
+# --data-urlencode on the command line, so they never appear in this
+# process's argv (and therefore /proc/*/cmdline).
+change_password_status="$(printf '%s\n' \
+  "--user admin:admin" \
+  "--data-urlencode login=admin" \
+  "--data-urlencode previousPassword=admin" \
+  "--data-urlencode password=${NEW_PASSWORD}" \
+  | curl -fsS --max-time "${CURL_MAX_TIME}" -o /dev/null -w '%{http_code}' \
+      --config - -X POST "${HOST_URL}/api/users/change_password")"
 
 if [[ "$change_password_status" != "204" ]]; then
   log "Failed to change the default admin password (HTTP ${change_password_status})."
@@ -50,10 +60,11 @@ if [[ "$change_password_status" != "204" ]]; then
 fi
 
 log "Generating SonarQube user token '${TOKEN_NAME}'..."
-response="$(curl -fsS \
-  -u "admin:${NEW_PASSWORD}" \
-  -X POST "${HOST_URL}/api/user_tokens/generate" \
-  --data-urlencode "name=${TOKEN_NAME}")"
+response="$(printf '%s\n' \
+  "--user admin:${NEW_PASSWORD}" \
+  "--data-urlencode name=${TOKEN_NAME}" \
+  | curl -fsS --max-time "${CURL_MAX_TIME}" \
+      --config - -X POST "${HOST_URL}/api/user_tokens/generate")"
 
 token="$(echo "$response" | jq -r '.token // empty')"
 if [[ -z "$token" ]]; then
