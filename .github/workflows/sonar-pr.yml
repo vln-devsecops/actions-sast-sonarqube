@@ -248,8 +248,20 @@ jobs:
       - name: Resolve baseline findings file
         id: baseline-findings
         run: |
+          set -euo pipefail
           if [[ "${{ steps.tier-a.outputs.found }}" == "true" || "${{ steps.tier-b.outputs.found }}" == "true" ]]; then
-            path="$(find .baseline-artifact -name '*.json' -print -quit)"
+            # -type f and a sort make the choice deterministic rather than
+            # dependent on directory order; an artifact is expected to hold
+            # exactly one findings JSON.
+            mapfile -t candidates < <(find .baseline-artifact -type f -name '*.json' | sort)
+            if (( ${#candidates[@]} == 0 )); then
+              echo "Baseline artifact contained no JSON findings file." >&2
+              exit 1
+            fi
+            if (( ${#candidates[@]} > 1 )); then
+              echo "Baseline artifact contained ${#candidates[@]} JSON files; using ${candidates[0]}." >&2
+            fi
+            path="${candidates[0]}"
           elif [[ "${{ steps.fallback-base-dir-check.outputs.exists }}" == "true" ]]; then
             path="${{ steps.fallback-base-scan.outputs.findings-json }}"
           else
@@ -257,6 +269,12 @@ jobs:
           fi
           if [[ -z "$path" ]]; then
             echo "Could not resolve a baseline findings file." >&2
+            exit 1
+          fi
+          # Catch a truncated/corrupt baseline here, with a clear message,
+          # rather than as a bare JSONDecodeError out of diff_findings.py.
+          if ! jq -e 'type == "array"' "$path" >/dev/null 2>&1; then
+            echo "Baseline findings file '$path' is not a JSON array." >&2
             exit 1
           fi
           echo "path=${path}" >> "$GITHUB_OUTPUT"
