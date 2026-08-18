@@ -45,6 +45,10 @@ on:
 jobs:
   pr-scan:
     runs-on: ubuntu-latest
+    # Every long step below has its own deadline (wait_for_sonarqube.sh 300s,
+    # run_scan.sh 600s), but image pulls and `docker compose up` don't - so
+    # cap the job rather than inherit the 6-hour default on a wedged runner.
+    timeout-minutes: 30
     permissions:
       contents: read
       checks: write
