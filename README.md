@@ -164,11 +164,10 @@ jobs:
 ```
 
 Pin to a version tag, not `@main` or a commit SHA: this repo tags releases
-via [release-please](https://github.com/googleapis/release-please), per
-`vln-devsecops/guidance`'s tagging policy. `@v1` tracks the newest `1.x.y`
-release (picks up minor and patch updates); `@v1.2` tracks the newest
-`1.2.z` patch only; an exact `@v1.2.3` never moves. Prefer `@v1` unless you
-need tighter pinning.
+via [release-please](https://github.com/googleapis/release-please). `@v1`
+tracks the newest `1.x.y` release (picks up minor and patch updates); `@v1.2`
+tracks the newest `1.2.z` patch only; an exact `@v1.2.3` never moves. Prefer
+`@v1` unless you need tighter pinning.
 
 **Fork PRs**: GitHub downgrades `GITHUB_TOKEN` to read-only for a
 `pull_request` event from a fork, regardless of the `permissions:` block
