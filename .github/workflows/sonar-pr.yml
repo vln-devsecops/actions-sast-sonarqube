@@ -146,11 +146,16 @@ jobs:
 
       - name: Record baseline resolution
         id: baseline
+        env:
+          TIER_A_FOUND: ${{ steps.tier-a.outputs.found }}
+          TIER_B_FOUND: ${{ steps.tier-b.outputs.found }}
+          MERGE_BASE: ${{ steps.refs.outputs.merge-base }}
+          TARGET_HEAD_SHA: ${{ steps.refs.outputs.target-head-sha }}
         run: |
-          if [[ "${{ steps.tier-a.outputs.found }}" == "true" ]]; then
-            tier="tier a: artifact for merge-base ${{ steps.refs.outputs.merge-base }}"
-          elif [[ "${{ steps.tier-b.outputs.found }}" == "true" ]]; then
-            tier="tier b: artifact for target branch HEAD ${{ steps.refs.outputs.target-head-sha }}"
+          if [[ "$TIER_A_FOUND" == "true" ]]; then
+            tier="tier a: artifact for merge-base ${MERGE_BASE}"
+          elif [[ "$TIER_B_FOUND" == "true" ]]; then
+            tier="tier b: artifact for target branch HEAD ${TARGET_HEAD_SHA}"
           else
             tier="fallback: no artifact found, scanning target branch HEAD live in this job"
           fi
@@ -176,8 +181,10 @@ jobs:
       - name: Check whether target branch has project-base-dir
         id: fallback-base-dir-check
         if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
+        env:
+          PROJECT_BASE_DIR: ${{ inputs.project-base-dir }}
         run: |
-          if [[ -d ".baseline-checkout/${{ inputs.project-base-dir }}" ]]; then
+          if [[ -d ".baseline-checkout/${PROJECT_BASE_DIR}" ]]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -243,17 +250,25 @@ jobs:
 
       - name: Record findings report link
         if: always() && steps.upload-report.outcome == 'success'
+        env:
+          ARTIFACT_URL: ${{ steps.upload-report.outputs.artifact-url }}
         run: |
           {
             echo "### SonarQube Community findings report"
-            echo "Full current finding set, with exact locations: ${{ steps.upload-report.outputs.artifact-url }}"
+            echo "Full current finding set, with exact locations: ${ARTIFACT_URL}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Resolve baseline findings file
         id: baseline-findings
+        env:
+          TIER_A_FOUND: ${{ steps.tier-a.outputs.found }}
+          TIER_B_FOUND: ${{ steps.tier-b.outputs.found }}
+          FALLBACK_BASE_DIR_EXISTS: ${{ steps.fallback-base-dir-check.outputs.exists }}
+          FALLBACK_BASE_SCAN_FINDINGS: ${{ steps.fallback-base-scan.outputs.findings-json }}
+          FALLBACK_EMPTY_BASELINE_FINDINGS: ${{ steps.fallback-empty-baseline.outputs.findings-json }}
         run: |
           set -euo pipefail
-          if [[ "${{ steps.tier-a.outputs.found }}" == "true" || "${{ steps.tier-b.outputs.found }}" == "true" ]]; then
+          if [[ "$TIER_A_FOUND" == "true" || "$TIER_B_FOUND" == "true" ]]; then
             # -type f and a sort make the choice deterministic rather than
             # dependent on directory order; an artifact is expected to hold
             # exactly one findings JSON.
@@ -266,10 +281,10 @@ jobs:
               echo "Baseline artifact contained ${#candidates[@]} JSON files; using ${candidates[0]}." >&2
             fi
             path="${candidates[0]}"
-          elif [[ "${{ steps.fallback-base-dir-check.outputs.exists }}" == "true" ]]; then
-            path="${{ steps.fallback-base-scan.outputs.findings-json }}"
+          elif [[ "$FALLBACK_BASE_DIR_EXISTS" == "true" ]]; then
+            path="$FALLBACK_BASE_SCAN_FINDINGS"
           else
-            path="${{ steps.fallback-empty-baseline.outputs.findings-json }}"
+            path="$FALLBACK_EMPTY_BASELINE_FINDINGS"
           fi
           if [[ -z "$path" ]]; then
             echo "Could not resolve a baseline findings file." >&2
@@ -285,10 +300,13 @@ jobs:
 
       - name: Diff findings
         id: diff
+        env:
+          BASELINE_FINDINGS: ${{ steps.baseline-findings.outputs.path }}
+          HEAD_FINDINGS: ${{ steps.head-scan.outputs.findings-json }}
         run: |
           python3 .sast-sonarqube/scripts/diff_findings.py \
-            --baseline "${{ steps.baseline-findings.outputs.path }}" \
-            --head "${{ steps.head-scan.outputs.findings-json }}" \
+            --baseline "$BASELINE_FINDINGS" \
+            --head "$HEAD_FINDINGS" \
             --changed-files changed-files.txt \
             --out new-findings.json \
             --removed-out removed-findings.json
@@ -301,6 +319,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          NEW_FINDINGS: ${{ steps.diff.outputs.new-findings }}
+          SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+          BLOCKING: ${{ inputs.blocking }}
+          CHECK_NAME: ${{ inputs.check-name }}
         run: |
           set -o pipefail
           # GitHub downgrades GITHUB_TOKEN to read-only for a pull_request
@@ -314,12 +336,12 @@ jobs:
           {
             echo "### SonarQube Community blocking policy"
             python3 .sast-sonarqube/scripts/apply_policy.py \
-              --findings "${{ steps.diff.outputs.new-findings }}" \
-              --threshold "${{ inputs.severity-threshold }}" \
-              --blocking "${{ inputs.blocking }}" \
+              --findings "$NEW_FINDINGS" \
+              --threshold "$SEVERITY_THRESHOLD" \
+              --blocking "$BLOCKING" \
               --repo "$REPO" \
               --sha "$HEAD_SHA" \
-              --check-name "${{ inputs.check-name }}" \
+              --check-name "$CHECK_NAME" \
               --result-out policy-result.json
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -337,14 +359,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASELINE_FINDINGS: ${{ steps.baseline-findings.outputs.path }}
+          REMOVED_FINDINGS: ${{ steps.diff.outputs.removed-findings }}
+          BASELINE_TIER: ${{ steps.baseline.outputs.tier }}
         run: |
           python3 .sast-sonarqube/scripts/post_pr_comment.py \
             --repo "$REPO" \
             --pr-number "$PR_NUMBER" \
             --result policy-result.json \
-            --baseline-findings "${{ steps.baseline-findings.outputs.path }}" \
-            --removed-findings "${{ steps.diff.outputs.removed-findings }}" \
-            --baseline-tier "${{ steps.baseline.outputs.tier }}"
+            --baseline-findings "$BASELINE_FINDINGS" \
+            --removed-findings "$REMOVED_FINDINGS" \
+            --baseline-tier "$BASELINE_TIER"
 
       - name: Tear down ephemeral SonarQube stack
         if: always()
