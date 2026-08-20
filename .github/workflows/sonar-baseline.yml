@@ -53,7 +53,12 @@ jobs:
       - name: Resolve this action's own source ref
         id: action-source
         env:
-          WORKFLOW_REF: ${{ github.workflow_ref }}
+          # github.workflow_ref is the *top-level* workflow that triggered
+          # this run - for an external caller that's the CALLER's workflow
+          # file, not this one. github.job_workflow_ref is the ref of the
+          # reusable workflow actually running this job, which is what we
+          # need to check out our own source.
+          WORKFLOW_REF: ${{ github.job_workflow_ref }}
         run: |
           ref="${WORKFLOW_REF#*@}"
           repo="${WORKFLOW_REF%%/.github/*}"
