@@ -55,10 +55,11 @@ jobs:
         env:
           # github.workflow_ref is the *top-level* workflow that triggered
           # this run - for an external caller that's the CALLER's workflow
-          # file, not this one. github.job_workflow_ref is the ref of the
-          # reusable workflow actually running this job, which is what we
-          # need to check out our own source.
-          WORKFLOW_REF: ${{ github.job_workflow_ref }}
+          # file, not this one. job.workflow_ref (job context, not github
+          # context - there is no such thing as github.job_workflow_ref)
+          # is the ref of the reusable workflow actually running this job,
+          # which is what we need to check out our own source.
+          WORKFLOW_REF: ${{ job.workflow_ref }}
         run: |
           ref="${WORKFLOW_REF#*@}"
           repo="${WORKFLOW_REF%%/.github/*}"
