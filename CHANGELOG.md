@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.0.1...v1.0.2) (2026-08-20)
+
+
+### Bug Fixes
+
+* use job.workflow_ref, not the nonexistent github.job_workflow_ref ([5f35969](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/5f35969c6074a00813a85a3bed6894140be3de6c))
+
 ## [1.0.1](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.0.0...v1.0.1) (2026-08-20)
 
 
