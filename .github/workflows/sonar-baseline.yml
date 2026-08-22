@@ -30,6 +30,18 @@ on:
         description: Retention period for the uploaded findings artifact.
         type: number
         default: 90
+      sast-config-path:
+        description: >-
+          Path, relative to project-base-dir, to an optional noise-reduction
+          config file (see the action README's ".sastrc" section).
+        type: string
+        default: .sastrc
+      sast-ignore-path:
+        description: >-
+          Path, relative to project-base-dir, to an optional .gitignore-syntax
+          path-exclusions file (see the action README's ".sastignore" section).
+        type: string
+        default: .sastignore
 
 jobs:
   baseline-scan:
@@ -97,6 +109,8 @@ jobs:
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: ${{ inputs.project-key }}
           project-base-dir: ${{ inputs.project-base-dir }}
+          sast-config-path: ${{ inputs.sast-config-path }}
+          sast-ignore-path: ${{ inputs.sast-ignore-path }}
 
       - name: Upload baseline findings artifact
         # Bundles the machine-readable JSON (what sonar-pr.yml's baseline

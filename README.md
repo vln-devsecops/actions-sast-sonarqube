@@ -176,6 +176,63 @@ the job on policy the same as any other PR - it just can't publish the
 Check Run or PR comment, since both need write access it doesn't have.
 Findings are reported in the job's step summary instead in that case.
 
+## Reducing noise: `.sastrc` and `.sastignore`
+
+SonarQube's default rule set fires on every file it can parse, with no
+per-repo tuning out of the box. Drop either or both of these optional files
+into `project-base-dir` (paths configurable via the `sast-config-path` /
+`sast-ignore-path` inputs, both forwarded by `sonar-baseline.yml` and
+`sonar-pr.yml`) to cut that down. Neither file existing reproduces the
+exact scan behavior from before this feature existed.
+
+**`.sastignore`** (default path `.sastignore`) - plain path exclusions,
+using the same syntax as `.gitignore`: one pattern per line, `#` comments,
+blank lines ignored. Use this for the common case of "just don't scan
+these paths" (vendored code, generated files, fixtures, etc.):
+
+```gitignore
+# .sastignore
+vendor/
+**/*.generated.go
+/build
+```
+
+A leading `!` (negation) is rejected with an error rather than silently
+mismatched - `sonar.exclusions` has no per-pattern re-include, so a
+negated pattern can't be honored faithfully. Drop it, or express the
+exception via `.sastrc`'s `ignore` criteria below.
+
+**`.sastrc`** (default path `.sastrc`, YAML) - structured config for
+exclusions plus per-rule issue suppression:
+
+```yaml
+# .sastrc
+exclusions:
+  paths: ["**/vendor/**"]           # merged with .sastignore into sonar.exclusions
+  coverage_paths: ["**/mocks/**"]   # -> sonar.coverage.exclusions
+  duplication_paths: ["**/testdata/**"]  # -> sonar.cpd.exclusions
+
+ignore:                             # -> sonar.issue.ignore.multicriteria
+  - rule: "python:S101"             # suppress one specific rule...
+    paths: ["tests/**"]             # ...on matching paths
+  - rule: "*"                       # or every rule ("*" wildcard)...
+    paths: ["legacy/**"]            # ...on a path you're not ready to clean up yet
+```
+
+Each `ignore` entry maps onto SonarQube's own
+[`sonar.issue.ignore.multicriteria`](https://docs.sonarsource.com/sonarqube-community-build/analyzing-source-code/analysis-parameters/)
+mechanism (one rule + one path pattern per criterion; a `paths` list with
+multiple entries fans out into one criterion per path). It applies to
+*Issues* only - Security Hotspots have no rule-suppression mechanism of
+their own and always need reviewing directly.
+
+Both files are validated against an explicit schema/allowlist
+(`scripts/build_scan_config.py`) and **fail the job closed** - a typo'd or
+unrecognized key exits non-zero with a clear error before the scan runs,
+rather than silently doing nothing. There is deliberately no way to set
+`sonar.host.url`, `sonar.token`, `sonar.projectKey`, `sonar.projectBaseDir`,
+or `sonar.working.directory` through either file.
+
 ## Testing
 
 ```sh

@@ -25,6 +25,22 @@ inputs:
     description: How long to wait for the SonarQube background compute-engine task to finish.
     required: false
     default: "600"
+  sast-config-path:
+    description: >-
+      Path, relative to project-base-dir, to an optional noise-reduction
+      config file (sonar.exclusions, sonar.coverage.exclusions,
+      sonar.cpd.exclusions, sonar.issue.ignore.multicriteria - see
+      scripts/build_scan_config.py and the README). Skipped entirely if the
+      file doesn't exist.
+    required: false
+    default: .sastrc
+  sast-ignore-path:
+    description: >-
+      Path, relative to project-base-dir, to an optional path-exclusions
+      file using .gitignore syntax, merged into the same exclusions
+      .sastrc produces. Skipped entirely if the file doesn't exist.
+    required: false
+    default: .sastignore
 
 outputs:
   findings-json:
@@ -48,6 +64,10 @@ runs:
       with:
         python-version: "3.12"
 
+    - name: Install Python dependencies
+      shell: bash
+      run: pip install -r "${{ github.action_path }}/requirements.txt"
+
     - name: Run SonarQube scan
       id: scan
       shell: bash
@@ -58,6 +78,8 @@ runs:
         PROJECT_BASE_DIR: ${{ inputs.project-base-dir }}
         SCAN_TIMEOUT_SECONDS: ${{ inputs.scan-timeout-seconds }}
         COMPOSE_FILE: ${{ github.action_path }}/docker-compose.ephemeral.yml
+        SAST_CONFIG_FILE: ${{ inputs.project-base-dir }}/${{ inputs.sast-config-path }}
+        SAST_IGNORE_FILE: ${{ inputs.project-base-dir }}/${{ inputs.sast-ignore-path }}
       run: "${{ github.action_path }}/scripts/run_scan.sh"
 
     - name: Fetch and normalize findings
