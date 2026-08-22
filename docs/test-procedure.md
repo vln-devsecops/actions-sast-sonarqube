@@ -135,7 +135,7 @@ set it up deliberately:
 2. Branch a test PR off `OLD`.
 3. Push a new commit to `dev` directly (or merge something else), producing
    a new HEAD (`NEW`) with its own fresh `sonar-baseline-<NEW>` artifact.
-4. Delete the artifact for `OLD` (see section 8 for how).
+4. Delete the artifact for `OLD` (see section 9 for how).
 5. Open/refresh the PR from step 2 (still forked from `OLD`). Its
    merge-base is `OLD` (no artifact), but the target's current HEAD is
    `NEW` (has one) - tier b should fire.
@@ -144,7 +144,7 @@ Expect: `tier b: artifact for target branch HEAD <NEW sha>`.
 
 ### Fallback - neither artifact exists
 
-Delete (see section 8) any `sonar-baseline-*` artifacts for both the PR's
+Delete (see section 9) any `sonar-baseline-*` artifacts for both the PR's
 merge-base and the target branch's current HEAD, then open/refresh a PR.
 Expect: `fallback: no artifact found, scanning target branch HEAD live in
 this job`.
@@ -184,7 +184,31 @@ Revert the change (or lower `severity-threshold` / set `blocking: false` as
 inputs on `sonar-pr.yml`) and confirm the same PR goes green without
 re-triggering a code review - the gate should only care about current state.
 
-## 8. Deleting a baseline artifact
+## 8. `.sastrc` / `.sastignore` noise reduction
+
+`fixtures/.sastignore` and `fixtures/.sastrc` are permanent, checked-in
+fixtures (not scratch - see section 10's cleanup note) that dogfood both
+mechanisms in this repo's own `ci.yml` on every run, alongside
+`fixtures/excluded/noisy.py` and `fixtures/ignored/noisy.py`, which exist
+solely to be suppressed by them. Neither touches `fixtures/python/app.py` or
+`fixtures/js/app.js`, so section 7's documented "5 MAJOR-or-above findings"
+count is unaffected.
+
+To confirm both mechanisms live, run section 2's baseline scan against
+`fixtures/` and inspect `/tmp/baseline-findings.json`:
+
+- No finding has `"path"` starting with `excluded/` (`sonar.exclusions`,
+  via `.sastignore`, skipped analyzing it entirely).
+- No finding has `"path"` starting with `ignored/` (`sonar.issue.ignore.multicriteria`,
+  via `.sastrc`, analyzed it but suppressed the result).
+
+To confirm the fail-closed validation, temporarily add an unrecognized key
+to a copy of `fixtures/.sastrc` (e.g. `sonar.token: x`) and rerun
+`scripts/run_scan.sh` - expect it to exit non-zero with `Invalid SAST
+config: ...` before the scanner ever runs, rather than silently ignoring
+the mistake.
+
+## 9. Deleting a baseline artifact
 
 Needed for sections 4 (tier b, fallback) and for general cleanup after
 testing. Either:
@@ -201,11 +225,14 @@ testing. Either:
   Find `<artifact_id>` via
   `GET /repos/<owner>/<repo>/actions/artifacts?name=sonar-baseline-<sha>`.
 
-## 9. Cleanup after manual testing
+## 10. Cleanup after manual testing
 
 - Close/delete scratch branches and PRs created for this procedure.
 - Delete any `sonar-baseline-*` (and `*-fallback-base`, if a fallback scan
   ran under a distinct project key) artifacts created purely for testing,
   so they don't linger and skew a later real PR's baseline resolution.
+- Leave `fixtures/.sastrc`, `fixtures/.sastignore`, `fixtures/excluded/`,
+  and `fixtures/ignored/` in place - they're permanent fixtures (section 8),
+  not scratch created for one test run.
 - Revert any deliberate `fixtures/` changes made for section 6 or 7 that
   weren't meant to be permanent.

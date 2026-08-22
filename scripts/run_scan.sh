@@ -4,7 +4,10 @@
 #
 # Required env: SONAR_HOST_URL, SONAR_TOKEN, PROJECT_KEY, PROJECT_BASE_DIR,
 #                COMPOSE_FILE (path to docker-compose.ephemeral.yml, used only
-#                to read back the pinned scanner image tag)
+#                to read back the pinned scanner image tag),
+#                SAST_CONFIG_FILE, SAST_IGNORE_FILE (paths to the consumer's
+#                optional .sastrc / .sastignore noise-reduction files - need
+#                not exist)
 # Optional env:  SCAN_TIMEOUT_SECONDS (default 600)
 set -euo pipefail
 
@@ -13,6 +16,8 @@ set -euo pipefail
 : "${PROJECT_KEY:?PROJECT_KEY is required}"
 : "${PROJECT_BASE_DIR:?PROJECT_BASE_DIR is required}"
 : "${COMPOSE_FILE:?COMPOSE_FILE is required}"
+: "${SAST_CONFIG_FILE:?SAST_CONFIG_FILE is required}"
+: "${SAST_IGNORE_FILE:?SAST_IGNORE_FILE is required}"
 
 SCAN_TIMEOUT_SECONDS="${SCAN_TIMEOUT_SECONDS:-600}"
 POLL_INTERVAL_SECONDS=5
@@ -44,7 +49,19 @@ rm -rf "${ABS_PROJECT_BASE_DIR}/.scannerwork"
 # Give the scanner a dedicated, host-created (so correctly-owned) cache dir
 # instead of letting it fall back to the image's built-in one.
 SCANNER_CACHE_DIR="$(mktemp -d)"
-trap 'rm -rf "${SCANNER_CACHE_DIR}"' EXIT
+EXTRA_ARGS_FILE="$(mktemp)"
+trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}"' EXIT
+
+# Translate the consumer's optional .sastrc/.sastignore noise-reduction
+# files (neither need exist) into extra sonar-scanner -D properties. This
+# always runs - build_scan_config.py itself treats a missing file as
+# "contributes nothing" - so a repo with neither file gets the exact same
+# scanner invocation as before this feature existed.
+python3 "$(dirname "${BASH_SOURCE[0]}")/build_scan_config.py" \
+  --config "$SAST_CONFIG_FILE" \
+  --ignore-file "$SAST_IGNORE_FILE" \
+  --out "$EXTRA_ARGS_FILE"
+readarray -d '' -t EXTRA_SCANNER_ARGS < "$EXTRA_ARGS_FILE"
 
 echo "Scanning ${ABS_PROJECT_BASE_DIR} as project '${PROJECT_KEY}'..."
 docker run --rm \
@@ -60,11 +77,16 @@ docker run --rm \
   "${SCANNER_IMAGE}" \
   -Dsonar.projectKey="${PROJECT_KEY}" \
   -Dsonar.projectBaseDir=/usr/src \
-  -Dsonar.working.directory=/usr/src/.scannerwork
-  # ^ The current SonarScanner Engine (sonar-scanner-cli 12.x / engine 8.x)
-  #   defaults this to /tmp/.scannerwork inside the container - not a path
-  #   under projectBaseDir - so report-task.txt (read back from the host
-  #   below) would never reach the bind mount without this override.
+  -Dsonar.working.directory=/usr/src/.scannerwork \
+  "${EXTRA_SCANNER_ARGS[@]}"
+  # ^ sonar.working.directory: the current SonarScanner Engine
+  #   (sonar-scanner-cli 12.x / engine 8.x) defaults this to
+  #   /tmp/.scannerwork inside the container - not a path under
+  #   projectBaseDir - so report-task.txt (read back from the host below)
+  #   would never reach the bind mount without this override.
+  # EXTRA_SCANNER_ARGS: any -D properties derived from the consumer's
+  #   optional .sastrc/.sastignore files (see build_scan_config.py above) -
+  #   empty when neither file exists.
 
 report_task_file="${ABS_PROJECT_BASE_DIR}/.scannerwork/report-task.txt"
 if [[ ! -f "$report_task_file" ]]; then

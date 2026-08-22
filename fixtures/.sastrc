@@ -1,0 +1,7 @@
+# Noise-reduction dogfooding for this repo's own CI - see README's
+# ".sastrc" / ".sastignore" section. Every finding under fixtures/ignored/
+# is suppressed (rule "*" matches any rule), but the file is still analyzed
+# - unlike fixtures/.sastignore's exclusions/, which skip analysis entirely.
+ignore:
+  - rule: "*"
+    paths: ["ignored/**"]

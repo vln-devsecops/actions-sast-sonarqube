@@ -1,0 +1,3 @@
+# Noise-reduction dogfooding for this repo's own CI - see README's
+# ".sastrc" / ".sastignore" section. fixtures/excluded/ is never analyzed.
+excluded/

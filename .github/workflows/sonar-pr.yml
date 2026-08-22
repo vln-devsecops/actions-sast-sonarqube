@@ -41,6 +41,18 @@ on:
           not something later runs resolve by name.
         type: number
         default: 30
+      sast-config-path:
+        description: >-
+          Path, relative to project-base-dir, to an optional noise-reduction
+          config file (see the action README's ".sastrc" section).
+        type: string
+        default: .sastrc
+      sast-ignore-path:
+        description: >-
+          Path, relative to project-base-dir, to an optional .gitignore-syntax
+          path-exclusions file (see the action README's ".sastignore" section).
+        type: string
+        default: .sastignore
 
 jobs:
   pr-scan:
@@ -221,6 +233,8 @@ jobs:
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: ${{ inputs.project-key }}-fallback-base
           project-base-dir: .baseline-checkout/${{ inputs.project-base-dir }}
+          sast-config-path: ${{ inputs.sast-config-path }}
+          sast-ignore-path: ${{ inputs.sast-ignore-path }}
 
       - name: Use empty baseline (target branch lacks project-base-dir)
         id: fallback-empty-baseline
@@ -237,6 +251,8 @@ jobs:
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: ${{ inputs.project-key }}
           project-base-dir: ${{ inputs.project-base-dir }}
+          sast-config-path: ${{ inputs.sast-config-path }}
+          sast-ignore-path: ${{ inputs.sast-ignore-path }}
 
       # The full current finding set (not just this PR's new findings, which
       # the Check Run annotations already cover inline-on-diff) - the
