@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.0.2...v1.1.0) (2026-08-22)
+
+
+### Features
+
+* add .sastrc / .sastignore noise-reduction config files ([a6948e0](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/a6948e06bebe978e04c23a40dad301f9f73e4d54))
+
 ## [1.0.2](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.0.1...v1.0.2) (2026-08-20)
 
 
