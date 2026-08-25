@@ -53,6 +53,17 @@ on:
           path-exclusions file (see the action README's ".sastignore" section).
         type: string
         default: .sastignore
+      baseline-scm-history:
+        description: >-
+          Whether the fallback baseline scan (see "Baseline resolution for
+          PRs" in the README) should have git history available for SCM/blame
+          analysis. Defaults to false: the baseline checkout stays shallow
+          and the scanner's SCM sensor is disabled, so no blame warnings are
+          emitted for a scan whose findings are only ever diffed, never
+          browsed for authorship. Set true to fetch full history and let the
+          scanner read blame data instead.
+        type: boolean
+        default: false
 
 jobs:
   pr-scan:
@@ -190,6 +201,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: .baseline-checkout
+          fetch-depth: ${{ inputs.baseline-scm-history && 0 || 1 }}
 
       # project-base-dir might not exist yet on the target branch at all -
       # e.g. this PR is the one introducing it. That's not a misconfiguration
@@ -235,6 +247,7 @@ jobs:
           project-base-dir: .baseline-checkout/${{ inputs.project-base-dir }}
           sast-config-path: ${{ inputs.sast-config-path }}
           sast-ignore-path: ${{ inputs.sast-ignore-path }}
+          scm-disabled: ${{ inputs.baseline-scm-history && 'false' || 'true' }}
 
       - name: Use empty baseline (target branch lacks project-base-dir)
         id: fallback-empty-baseline

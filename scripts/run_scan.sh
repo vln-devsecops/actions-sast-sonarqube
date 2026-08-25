@@ -8,7 +8,9 @@
 #                SAST_CONFIG_FILE, SAST_IGNORE_FILE (paths to the consumer's
 #                optional .sastrc / .sastignore noise-reduction files - need
 #                not exist)
-# Optional env:  SCAN_TIMEOUT_SECONDS (default 600)
+# Optional env:  SCAN_TIMEOUT_SECONDS (default 600), SCM_DISABLED (default false -
+#                set "true" to pass -Dsonar.scm.disabled=true, for a shallow
+#                checkout where blame data isn't available)
 set -euo pipefail
 
 : "${SONAR_HOST_URL:?SONAR_HOST_URL is required}"
@@ -57,10 +59,15 @@ trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}"' EXIT
 # always runs - build_scan_config.py itself treats a missing file as
 # "contributes nothing" - so a repo with neither file gets the exact same
 # scanner invocation as before this feature existed.
-python3 "$(dirname "${BASH_SOURCE[0]}")/build_scan_config.py" \
-  --config "$SAST_CONFIG_FILE" \
-  --ignore-file "$SAST_IGNORE_FILE" \
+build_scan_config_args=(
+  --config "$SAST_CONFIG_FILE"
+  --ignore-file "$SAST_IGNORE_FILE"
   --out "$EXTRA_ARGS_FILE"
+)
+if [[ "${SCM_DISABLED:-false}" == "true" ]]; then
+  build_scan_config_args+=(--scm-disabled)
+fi
+python3 "$(dirname "${BASH_SOURCE[0]}")/build_scan_config.py" "${build_scan_config_args[@]}"
 readarray -d '' -t EXTRA_SCANNER_ARGS < "$EXTRA_ARGS_FILE"
 
 echo "Scanning ${ABS_PROJECT_BASE_DIR} as project '${PROJECT_KEY}'..."
@@ -85,8 +92,9 @@ docker run --rm \
   #   projectBaseDir - so report-task.txt (read back from the host below)
   #   would never reach the bind mount without this override.
   # EXTRA_SCANNER_ARGS: any -D properties derived from the consumer's
-  #   optional .sastrc/.sastignore files (see build_scan_config.py above) -
-  #   empty when neither file exists.
+  #   optional .sastrc/.sastignore files (see build_scan_config.py above),
+  #   plus -Dsonar.scm.disabled=true when SCM_DISABLED=true - empty when
+  #   neither file exists and SCM_DISABLED is unset.
 
 report_task_file="${ABS_PROJECT_BASE_DIR}/.scannerwork/report-task.txt"
 if [[ ! -f "$report_task_file" ]]; then

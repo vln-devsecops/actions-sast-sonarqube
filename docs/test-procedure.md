@@ -156,6 +156,13 @@ against a repo (no baseline artifact has been published yet), or whenever
 target branch has project-base-dir" step) - no manual artifact deletion
 needed to exercise those specific cases.
 
+While a fallback run is going, check the "Scan target branch HEAD (fallback
+path only)" step's log: by default it should have no "Shallow clone
+detected" / "Missing blame information" WARN lines (`sonar.scm.disabled=true`
+suppresses them). Rerun the same PR with `baseline-scm-history: true` set on
+`sonar-pr.yml` and confirm the warnings reappear - that's `fetch-depth: 0`
+and the SCM sensor back on, as requested.
+
 ## 6. Hash-based matching survives line churn
 
 In a test PR, change a file under `project-base-dir` two ways at once:
