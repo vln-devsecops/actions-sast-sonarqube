@@ -203,7 +203,7 @@ negated pattern can't be honored faithfully. Drop it, or express the
 exception via `.sastrc`'s `ignore` criteria below.
 
 **`.sastrc`** (default path `.sastrc`, YAML) - structured config for
-exclusions plus per-rule issue suppression:
+exclusions, test-source classification, and per-rule issue suppression:
 
 ```yaml
 # .sastrc
@@ -212,12 +212,25 @@ exclusions:
   coverage_paths: ["**/mocks/**"]   # -> sonar.coverage.exclusions
   duplication_paths: ["**/testdata/**"]  # -> sonar.cpd.exclusions
 
+tests:
+  paths: ["src/**/*.test.ts", "features/**"]  # -> sonar.tests
+
 ignore:                             # -> sonar.issue.ignore.multicriteria
   - rule: "python:S101"             # suppress one specific rule...
     paths: ["tests/**"]             # ...on matching paths
   - rule: "*"                       # or every rule ("*" wildcard)...
     paths: ["legacy/**"]            # ...on a path you're not ready to clean up yet
 ```
+
+If `tests.paths` is not set, SonarQube guesses which files are test code from
+their filenames - a file is classified as a test if its name starts with
+`test`, contains `test.` or `tests.`, or sits under a directory named (or
+ending in) `doc`, `docs`, `test`, `tests`, `mock`, or `mocks`. SonarQube
+applies a different rule set to files classified as tests than to main code,
+so an ordinary layout that mixes naming conventions - e.g. `*.test.ts` next
+to `*.steps.ts` for the same suite - can end up with only some of its test
+files analyzed as tests. Set `tests.paths` explicitly whenever your test
+files don't all match the heuristic, or when non-test files accidentally do.
 
 Each `ignore` entry maps onto SonarQube's own
 [`sonar.issue.ignore.multicriteria`](https://docs.sonarsource.com/sonarqube-community-build/analyzing-source-code/analysis-parameters/)

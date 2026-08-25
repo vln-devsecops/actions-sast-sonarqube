@@ -13,7 +13,13 @@ from build_scan_config import (
 
 def test_parse_sastrc_empty_text_is_empty_config():
     result = parse_sastrc("")
-    assert result == {"exclusions": [], "coverage_exclusions": [], "duplication_exclusions": [], "ignore": []}
+    assert result == {
+        "exclusions": [],
+        "coverage_exclusions": [],
+        "duplication_exclusions": [],
+        "tests": [],
+        "ignore": [],
+    }
 
 
 def test_parse_sastrc_blank_yaml_is_empty_config():
@@ -31,6 +37,30 @@ exclusions:
     assert result["exclusions"] == ["**/vendor/**", "**/*.generated.go"]
     assert result["coverage_exclusions"] == ["**/mocks/**"]
     assert result["duplication_exclusions"] == ["**/testdata/**"]
+
+
+def test_parse_sastrc_tests_maps_correctly():
+    text = """
+tests:
+  paths: ["src/**/*.test.ts", "features/**"]
+"""
+    result = parse_sastrc(text)
+    assert result["tests"] == ["src/**/*.test.ts", "features/**"]
+
+
+def test_parse_sastrc_rejects_unknown_tests_key():
+    with pytest.raises(ValueError, match="unrecognized key"):
+        parse_sastrc('tests:\n  sonar.host.url: "http://evil"\n')
+
+
+def test_parse_sastrc_rejects_non_mapping_tests():
+    with pytest.raises(ValueError, match="'tests' must be a mapping"):
+        parse_sastrc('tests: ["src/**/*.test.ts"]\n')
+
+
+def test_parse_sastrc_rejects_non_list_tests_paths():
+    with pytest.raises(ValueError, match="must be a list of non-empty strings"):
+        parse_sastrc('tests:\n  paths: "src/**/*.test.ts"\n')
 
 
 def test_parse_sastrc_ignore_single_path_per_entry():
@@ -193,6 +223,15 @@ exclusions:
     props = build_scan_properties(text, None)
     assert "sonar.coverage.exclusions=**/mocks/**" in props
     assert "sonar.cpd.exclusions=**/testdata/**" in props
+
+
+def test_build_scan_properties_tests_paths():
+    text = """
+tests:
+  paths: ["src/**/*.test.ts", "features/**"]
+"""
+    props = build_scan_properties(text, None)
+    assert props == ["sonar.tests=src/**/*.test.ts,features/**"]
 
 
 def test_build_scan_properties_ignore_criteria_multicriteria_ids():
