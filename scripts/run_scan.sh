@@ -59,15 +59,16 @@ trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}"' EXIT
 # always runs - build_scan_config.py itself treats a missing file as
 # "contributes nothing" - so a repo with neither file gets the exact same
 # scanner invocation as before this feature existed.
-python3 "$(dirname "${BASH_SOURCE[0]}")/build_scan_config.py" \
-  --config "$SAST_CONFIG_FILE" \
-  --ignore-file "$SAST_IGNORE_FILE" \
+build_scan_config_args=(
+  --config "$SAST_CONFIG_FILE"
+  --ignore-file "$SAST_IGNORE_FILE"
   --out "$EXTRA_ARGS_FILE"
-readarray -d '' -t EXTRA_SCANNER_ARGS < "$EXTRA_ARGS_FILE"
-
+)
 if [[ "${SCM_DISABLED:-false}" == "true" ]]; then
-  EXTRA_SCANNER_ARGS+=("-Dsonar.scm.disabled=true")
+  build_scan_config_args+=(--scm-disabled)
 fi
+python3 "$(dirname "${BASH_SOURCE[0]}")/build_scan_config.py" "${build_scan_config_args[@]}"
+readarray -d '' -t EXTRA_SCANNER_ARGS < "$EXTRA_ARGS_FILE"
 
 echo "Scanning ${ABS_PROJECT_BASE_DIR} as project '${PROJECT_KEY}'..."
 docker run --rm \

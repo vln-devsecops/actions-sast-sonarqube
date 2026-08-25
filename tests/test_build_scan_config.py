@@ -246,3 +246,19 @@ ignore:
     assert "sonar.issue.ignore.multicriteria.e1.resourceKey=tests/**" in props
     assert "sonar.issue.ignore.multicriteria.e2.ruleKey=python:S101" in props
     assert "sonar.issue.ignore.multicriteria.e2.resourceKey=scratch/**" in props
+
+
+def test_build_scan_properties_scm_disabled_defaults_off():
+    assert build_scan_properties(None, None) == []
+
+
+def test_build_scan_properties_scm_disabled_true_adds_property():
+    props = build_scan_properties(None, None, scm_disabled=True)
+    assert props == ["sonar.scm.disabled=true"]
+
+
+def test_build_scan_properties_scm_disabled_combines_with_sastrc():
+    props = build_scan_properties(
+        "exclusions:\n  paths: [\"vendor/**\"]\n", None, scm_disabled=True
+    )
+    assert props == ["sonar.scm.disabled=true", "sonar.exclusions=vendor/**"]

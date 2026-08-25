@@ -179,15 +179,22 @@ def parse_sastignore(text):
     return patterns
 
 
-def build_scan_properties(sastrc_text, sastignore_text):
+def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
     """Combine optional `.sastrc` and `.sastignore` text (either may be None
     or empty) into the final ordered list of `key=value` sonar-scanner
-    properties. Returns [] when both are absent/empty, reproducing today's
-    exact scanner invocation."""
+    properties. Returns [] when both are absent/empty and scm_disabled is
+    False, reproducing today's exact scanner invocation.
+
+    scm_disabled=True adds sonar.scm.disabled=true, for a shallow checkout
+    where the SCM sensor would otherwise warn about missing blame data for
+    every file (see run_scan.sh's SCM_DISABLED env var)."""
     sastrc = parse_sastrc(sastrc_text or "")
     ignore_patterns = parse_sastignore(sastignore_text or "")
 
     props = []
+
+    if scm_disabled:
+        props.append("sonar.scm.disabled=true")
 
     exclusions = sastrc["exclusions"] + ignore_patterns
     if exclusions:
@@ -214,6 +221,11 @@ def main():  # pragma: no cover - CLI glue, validated live
     parser.add_argument("--config", required=True, help="Path to an optional .sastrc file (need not exist)")
     parser.add_argument("--ignore-file", required=True, help="Path to an optional .sastignore file (need not exist)")
     parser.add_argument("--out", required=True, help="Path to write NUL-delimited -Dkey=value tokens to")
+    parser.add_argument(
+        "--scm-disabled",
+        action="store_true",
+        help="Add sonar.scm.disabled=true, for a shallow checkout with no blame data available",
+    )
     args = parser.parse_args()
 
     sastrc_text = None
@@ -227,7 +239,7 @@ def main():  # pragma: no cover - CLI glue, validated live
             sastignore_text = f.read()
 
     try:
-        props = build_scan_properties(sastrc_text, sastignore_text)
+        props = build_scan_properties(sastrc_text, sastignore_text, scm_disabled=args.scm_disabled)
     except ValueError as e:
         raise SystemExit(f"Invalid SAST config: {e}")
 
