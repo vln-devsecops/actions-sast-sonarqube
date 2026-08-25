@@ -16,6 +16,8 @@ same `sonar.exclusions` value `.sastrc`'s `exclusions.paths` produces.
       paths: ["**/vendor/**"]              # -> sonar.exclusions
       coverage_paths: ["**/mocks/**"]      # -> sonar.coverage.exclusions
       duplication_paths: ["**/testdata/**"]  # -> sonar.cpd.exclusions
+    tests:
+      paths: ["src/**/*.test.ts"]          # -> sonar.tests
     ignore:
       - rule: "python:S101"
         paths: ["tests/**"]
@@ -34,8 +36,9 @@ import sys
 
 import yaml
 
-ALLOWED_TOP_LEVEL_KEYS = {"exclusions", "ignore"}
+ALLOWED_TOP_LEVEL_KEYS = {"exclusions", "tests", "ignore"}
 ALLOWED_EXCLUSIONS_KEYS = {"paths", "coverage_paths", "duplication_paths"}
+ALLOWED_TESTS_KEYS = {"paths"}
 ALLOWED_IGNORE_KEYS = {"rule", "paths"}
 
 
@@ -49,13 +52,20 @@ def parse_sastrc(text):
     """Parse and validate `.sastrc` YAML text into:
 
         {"exclusions": [...], "coverage_exclusions": [...],
-         "duplication_exclusions": [...], "ignore": [(rule, path), ...]}
+         "duplication_exclusions": [...], "tests": [...],
+         "ignore": [(rule, path), ...]}
 
     Empty/blank text is treated as an empty (valid) config. Raises
     ValueError, naming the offending field, on anything that doesn't match
     the schema.
     """
-    result = {"exclusions": [], "coverage_exclusions": [], "duplication_exclusions": [], "ignore": []}
+    result = {
+        "exclusions": [],
+        "coverage_exclusions": [],
+        "duplication_exclusions": [],
+        "tests": [],
+        "ignore": [],
+    }
     if not text.strip():
         return result
 
@@ -87,6 +97,15 @@ def parse_sastrc(text):
         result["duplication_exclusions"] = _require_list_of_str(
             exclusions.get("duplication_paths", []), ".sastrc: exclusions.duplication_paths"
         )
+
+    tests = data.get("tests")
+    if tests is not None:
+        if not isinstance(tests, dict):
+            raise ValueError(".sastrc: 'tests' must be a mapping")
+        unknown = set(tests) - ALLOWED_TESTS_KEYS
+        if unknown:
+            raise ValueError(f".sastrc: 'tests' has unrecognized key(s): {', '.join(sorted(unknown))}")
+        result["tests"] = _require_list_of_str(tests.get("paths", []), ".sastrc: tests.paths")
 
     ignore = data.get("ignore")
     if ignore is not None:
@@ -177,6 +196,8 @@ def build_scan_properties(sastrc_text, sastignore_text):
         props.append(f"sonar.coverage.exclusions={','.join(sastrc['coverage_exclusions'])}")
     if sastrc["duplication_exclusions"]:
         props.append(f"sonar.cpd.exclusions={','.join(sastrc['duplication_exclusions'])}")
+    if sastrc["tests"]:
+        props.append(f"sonar.tests={','.join(sastrc['tests'])}")
 
     if sastrc["ignore"]:
         ids = [f"e{i + 1}" for i in range(len(sastrc["ignore"]))]
