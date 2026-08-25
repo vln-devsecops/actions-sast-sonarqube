@@ -41,6 +41,15 @@ inputs:
       .sastrc produces. Skipped entirely if the file doesn't exist.
     required: false
     default: .sastignore
+  scm-disabled:
+    description: >-
+      Set "true" to disable the scanner's SCM sensor (sonar.scm.disabled).
+      Use this when project-base-dir is a shallow checkout - without it the
+      scanner logs a "Shallow clone detected" warning plus one "Missing
+      blame information" line per file. Leave "false" (the default) for any
+      checkout that has full git history available.
+    required: false
+    default: "false"
 
 outputs:
   findings-json:
@@ -80,6 +89,7 @@ runs:
         COMPOSE_FILE: ${{ github.action_path }}/docker-compose.ephemeral.yml
         SAST_CONFIG_FILE: ${{ inputs.project-base-dir }}/${{ inputs.sast-config-path }}
         SAST_IGNORE_FILE: ${{ inputs.project-base-dir }}/${{ inputs.sast-ignore-path }}
+        SCM_DISABLED: ${{ inputs.scm-disabled }}
       run: "${{ github.action_path }}/scripts/run_scan.sh"
 
     - name: Fetch and normalize findings

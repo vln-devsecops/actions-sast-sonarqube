@@ -8,7 +8,9 @@
 #                SAST_CONFIG_FILE, SAST_IGNORE_FILE (paths to the consumer's
 #                optional .sastrc / .sastignore noise-reduction files - need
 #                not exist)
-# Optional env:  SCAN_TIMEOUT_SECONDS (default 600)
+# Optional env:  SCAN_TIMEOUT_SECONDS (default 600), SCM_DISABLED (default false -
+#                set "true" to pass -Dsonar.scm.disabled=true, for a shallow
+#                checkout where blame data isn't available)
 set -euo pipefail
 
 : "${SONAR_HOST_URL:?SONAR_HOST_URL is required}"
@@ -63,6 +65,10 @@ python3 "$(dirname "${BASH_SOURCE[0]}")/build_scan_config.py" \
   --out "$EXTRA_ARGS_FILE"
 readarray -d '' -t EXTRA_SCANNER_ARGS < "$EXTRA_ARGS_FILE"
 
+if [[ "${SCM_DISABLED:-false}" == "true" ]]; then
+  EXTRA_SCANNER_ARGS+=("-Dsonar.scm.disabled=true")
+fi
+
 echo "Scanning ${ABS_PROJECT_BASE_DIR} as project '${PROJECT_KEY}'..."
 docker run --rm \
   --network host \
@@ -85,8 +91,9 @@ docker run --rm \
   #   projectBaseDir - so report-task.txt (read back from the host below)
   #   would never reach the bind mount without this override.
   # EXTRA_SCANNER_ARGS: any -D properties derived from the consumer's
-  #   optional .sastrc/.sastignore files (see build_scan_config.py above) -
-  #   empty when neither file exists.
+  #   optional .sastrc/.sastignore files (see build_scan_config.py above),
+  #   plus -Dsonar.scm.disabled=true when SCM_DISABLED=true - empty when
+  #   neither file exists and SCM_DISABLED is unset.
 
 report_task_file="${ABS_PROJECT_BASE_DIR}/.scannerwork/report-task.txt"
 if [[ ! -f "$report_task_file" ]]; then

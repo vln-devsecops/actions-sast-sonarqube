@@ -67,6 +67,13 @@ See [`docs/design.md`](docs/design.md) for architecture-level rationale
 Which tier fired is recorded in the job's step summary and in the PR
 comment, to help tune artifact retention later.
 
+The fallback checkout is shallow (`fetch-depth: 1`) and its scan runs with
+the SCM sensor disabled (`sonar.scm.disabled=true`), so it doesn't pay for
+git blame data it has no use for - that scan only ever gets diffed against
+the PR head scan, never browsed for issue authorship. Set
+`baseline-scm-history: true` on `sonar-pr.yml` to fetch full history and
+enable blame analysis on the fallback scan instead.
+
 `actions/download-artifact` alone can only see artifacts from the *same*
 run. Finding "whichever artifact happens to be named
 `sonar-baseline-<sha>`" needs a name-filtered listing across the whole repo,
