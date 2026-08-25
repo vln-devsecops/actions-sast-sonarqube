@@ -225,13 +225,33 @@ exclusions:
     assert "sonar.cpd.exclusions=**/testdata/**" in props
 
 
-def test_build_scan_properties_tests_paths():
+def test_build_scan_properties_tests_paths_keeps_sources_at_shared_root():
+    # sonar.tests only accepts directories and rejects globs fatally, and
+    # narrowing it below sonar.sources makes SonarQube silently scan only
+    # that directory - so both must stay at the project root, with the
+    # caller's patterns carried by sonar.test.inclusions instead.
     text = """
 tests:
   paths: ["src/**/*.test.ts", "features/**"]
 """
     props = build_scan_properties(text, None)
-    assert props == ["sonar.tests=src/**/*.test.ts,features/**"]
+    assert props == [
+        "sonar.sources=.",
+        "sonar.tests=.",
+        "sonar.test.inclusions=src/**/*.test.ts,features/**",
+    ]
+
+
+def test_build_scan_properties_tests_paths_expands_bare_directory():
+    # A bare directory (no glob character) must still select everything
+    # under it once it's carried by sonar.test.inclusions rather than
+    # sonar.tests, or nothing in that directory would be treated as a test.
+    props = build_scan_properties('tests:\n  paths: ["features"]\n', None)
+    assert props == [
+        "sonar.sources=.",
+        "sonar.tests=.",
+        "sonar.test.inclusions=features/**",
+    ]
 
 
 def test_build_scan_properties_ignore_criteria_multicriteria_ids():

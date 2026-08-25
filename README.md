@@ -220,7 +220,7 @@ exclusions:
   duplication_paths: ["**/testdata/**"]  # -> sonar.cpd.exclusions
 
 tests:
-  paths: ["src/**/*.test.ts", "features/**"]  # -> sonar.tests
+  paths: ["src/**/*.test.ts", "features/**"]  # -> sonar.test.inclusions
 
 ignore:                             # -> sonar.issue.ignore.multicriteria
   - rule: "python:S101"             # suppress one specific rule...
@@ -238,6 +238,15 @@ so an ordinary layout that mixes naming conventions - e.g. `*.test.ts` next
 to `*.steps.ts` for the same suite - can end up with only some of its test
 files analyzed as tests. Set `tests.paths` explicitly whenever your test
 files don't all match the heuristic, or when non-test files accidentally do.
+
+`tests.paths` entries may be glob patterns (`sonar.test.inclusions` supports
+them) or bare directories (expanded to match everything under them). They do
+NOT map onto `sonar.tests` directly, on purpose: `sonar.tests` only accepts a
+list of directories - it rejects wildcards fatally - and narrowing it below
+`sonar.sources` makes SonarQube silently scan *only* that directory, with no
+warning and a job that still passes. `sonar.sources` and `sonar.tests` are
+instead both kept at the project root, with `sonar.test.inclusions` carrying
+`tests.paths` to mark which files under that shared root are tests.
 
 Each `ignore` entry maps onto SonarQube's own
 [`sonar.issue.ignore.multicriteria`](https://docs.sonarsource.com/sonarqube-community-build/analyzing-source-code/analysis-parameters/)
