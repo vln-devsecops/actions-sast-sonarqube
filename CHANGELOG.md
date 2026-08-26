@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.1.0...v1.2.0) (2026-08-26)
+
+
+### Features
+
+* Add baseline-scm-history input, disable SCM sensor on shallow baseline scan by default ([#43](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/43)) ([c51c27a](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/c51c27a71c4a3053901e0175e9476fd2525b4f87))
+
+
+### Bug Fixes
+
+* keep sonar.sources/tests at the project root, carry tests.paths via sonar.test.inclusions ([#47](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/47)) ([3b916fe](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/3b916feec44d6a9473d25e342d9457f0059c1e2f))
+
 ## [1.1.0](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.0.2...v1.1.0) (2026-08-22)
 
 
