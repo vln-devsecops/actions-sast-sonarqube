@@ -17,7 +17,7 @@ same `sonar.exclusions` value `.sastrc`'s `exclusions.paths` produces.
       coverage_paths: ["**/mocks/**"]      # -> sonar.coverage.exclusions
       duplication_paths: ["**/testdata/**"]  # -> sonar.cpd.exclusions
     tests:
-      paths: ["src/**/*.test.ts"]          # -> sonar.tests
+      paths: ["src/**/*.test.ts"]          # -> sonar.test.inclusions (see below)
     ignore:
       - rule: "python:S101"
         paths: ["tests/**"]
@@ -29,6 +29,26 @@ look like "noise reduction applied" when it wasn't. There is deliberately
 no way to set sonar.host.url/token/projectKey/projectBaseDir/working.directory
 or any other property through either file: the schema simply has no field
 for them.
+
+`tests.paths` does NOT map onto sonar.tests directly: sonar.tests only
+accepts a comma-separated list of directories, not globs, and rejects `*`
+fatally - but the whole reason this key exists is to let a caller name
+test files a filename heuristic can't catch (e.g. `*.steps.ts`), which
+needs a glob. Pointing sonar.tests at a narrower directory than
+sonar.sources also has its own failure mode: SonarQube silently drops
+everything outside that directory from the scan instead of erroring, so a
+caller who lists their test directories ends up with a scan that only
+reads those directories. Both are avoided by pointing sonar.sources and
+sonar.tests at the same root (the project base dir) and using
+sonar.test.inclusions - which is glob-capable - to say which files under
+that shared root are tests:
+
+    sonar.sources=.
+    sonar.tests=.
+    sonar.test.inclusions=<tests.paths, comma-joined; a bare directory
+                            entry with no glob character is expanded to
+                            "<dir>/**" so it still selects everything
+                            under it>
 """
 import argparse
 import os
@@ -204,7 +224,16 @@ def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
     if sastrc["duplication_exclusions"]:
         props.append(f"sonar.cpd.exclusions={','.join(sastrc['duplication_exclusions'])}")
     if sastrc["tests"]:
-        props.append(f"sonar.tests={','.join(sastrc['tests'])}")
+        # sonar.tests only accepts directories, not globs (fatal error
+        # otherwise), and pointing it at a directory narrower than
+        # sonar.sources makes SonarQube silently scan only that directory.
+        # Keep both sources and tests at the shared project root and use
+        # the glob-capable sonar.test.inclusions to mark which files under
+        # it are tests - see the module docstring.
+        inclusions = [path if any(c in path for c in "*?") else f"{path}/**" for path in sastrc["tests"]]
+        props.append("sonar.sources=.")
+        props.append("sonar.tests=.")
+        props.append(f"sonar.test.inclusions={','.join(inclusions)}")
 
     if sastrc["ignore"]:
         ids = [f"e{i + 1}" for i in range(len(sastrc["ignore"]))]
