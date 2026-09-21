@@ -64,10 +64,21 @@ on:
           scanner read blame data instead.
         type: boolean
         default: false
+      runner-type:
+        description: >-
+          Value for runs-on. Defaults to ubuntu-latest; callers that want a
+          self-hosted runner must resolve any fork-PR guard themselves and
+          pass the already-resolved value here - a reusable workflow's own
+          github.event_name is always "workflow_call", not the caller's
+          actual triggering event, so it can't evaluate that condition
+          itself (github.event.pull_request.head.repo.full_name is
+          similarly unavailable in this context).
+        type: string
+        default: ubuntu-latest
 
 jobs:
   pr-scan:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner-type }}
     # Every long step below has its own deadline (wait_for_sonarqube.sh 300s,
     # run_scan.sh 600s), but image pulls and `docker compose up` don't - so
     # cap the job rather than inherit the 6-hour default on a wedged runner.
