@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.2.0...v1.2.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* **run_scan:** root SCANNER_CACHE_DIR under RUNNER_TEMP, not bare /tmp ([#49](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/49)) ([1f293a2](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/1f293a2643726c49ad799382b179381f6351e2ca))
+
 ## [1.2.0](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.1.0...v1.2.0) (2026-09-21)
 
 
