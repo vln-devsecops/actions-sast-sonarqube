@@ -50,7 +50,18 @@ rm -rf "${ABS_PROJECT_BASE_DIR}/.scannerwork"
 # uid we end up running as (e.g. GitHub Actions' non-root `runner` user).
 # Give the scanner a dedicated, host-created (so correctly-owned) cache dir
 # instead of letting it fall back to the image's built-in one.
-SCANNER_CACHE_DIR="$(mktemp -d)"
+#
+# Rooted under RUNNER_TEMP, not bare mktemp -d's default of /tmp: this
+# directory gets bind-mounted into the container below and the scanner
+# extracts (and executes) a bundled JRE into it -- a bind mount inherits its
+# source filesystem's mount flags, so on a self-hosted runner whose system
+# /tmp is mounted noexec (a real, hardened runner we hit this on), the
+# scanner's own JRE launch fails with "Permission denied" no matter what the
+# container's own filesystem allows. RUNNER_TEMP is GitHub Actions' own
+# per-job scratch directory specifically meant to be writable *and*
+# executable; falling back to /tmp keeps this script working unchanged
+# outside Actions (e.g. a manual local run), where that risk doesn't apply.
+SCANNER_CACHE_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/sonar-scanner-cache.XXXXXX")"
 EXTRA_ARGS_FILE="$(mktemp)"
 trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}"' EXIT
 
