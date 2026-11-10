@@ -114,6 +114,36 @@ Run annotations already cover new findings inline-on-diff for that).
 alongside the JSON. `sonar-pr.yml` uploads the PR head scan's report as its
 own artifact and links it from the job's step summary.
 
+### Languages this scan can't analyze
+
+This action runs only `sonar-scanner-cli` in Docker - the plain Community
+Build CLI, not a build-integrated scanner. That CLI does not analyze C# or
+VB.NET (files get indexed, but no rules run against them - the scanner
+itself logs a `WARN` line to that effect) and has no plugin at all for C,
+C++, Objective-C, or Swift (so it never even indexes or logs about them;
+`scripts/detect_unanalyzed_languages.py` instead looks for `.c`, `.cc`,
+`.cpp`, `.cxx`, `.c++`, `.m`, `.mm`, and `.swift` files under
+`project-base-dir`, honoring `.sastrc` `exclusions.paths` and
+`.sastignore`). A repo in one of these languages would otherwise get a
+scan that looks clean - zero findings - while actually saying nothing
+about those files at all.
+
+Whenever this scan detects any of these languages, it says so **everywhere
+a clean result could otherwise appear**: a `::warning::` annotation and a
+job summary entry from this action itself, a banner at the top of the
+findings report, and - from `sonar-pr.yml` - the Check Run summary and the
+PR comment. The action also exposes an `unanalyzed-languages` output
+(comma-separated list of language names, empty string when none) so a
+caller can act on it directly.
+
+By default this only warns - it does not fail the job, so an existing
+`@v1` caller with an incidental file in one of these languages doesn't
+start failing out of nowhere. Set the `fail-on-unanalyzed-languages` input
+to `"true"` (on the action directly, or the equivalent input on either
+reusable workflow) to fail instead; the findings JSON and findings report
+are still produced first, so callers reading them with `if: always()`
+aren't affected by the failure.
+
 ### Blocking policy
 
 Our own, evaluated only against the new-findings set - not SonarQube's

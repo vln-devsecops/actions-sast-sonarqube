@@ -148,6 +148,28 @@ def test_build_summary_blocking_disabled_says_so():
     assert "Blocking is disabled" in summary
 
 
+def test_build_summary_no_banner_when_no_unanalyzed_languages():
+    summary = build_summary([], [], "MAJOR", False, unanalyzed_languages=[])
+    assert "Not analyzed" not in summary
+
+
+def test_build_summary_no_banner_when_unanalyzed_languages_omitted():
+    summary = build_summary([], [], "MAJOR", False)
+    assert "Not analyzed" not in summary
+
+
+def test_build_summary_shows_unanalyzed_languages_banner():
+    summary = build_summary([], [], "MAJOR", False, unanalyzed_languages=["C#", "VB.NET"])
+    assert "Not analyzed" in summary
+    assert "C#" in summary
+    assert "VB.NET" in summary
+
+
+def test_build_summary_banner_appears_before_the_findings_count():
+    summary = build_summary([], [], "MAJOR", False, unanalyzed_languages=["Swift"])
+    assert summary.index("Not analyzed") < summary.index("new finding(s)")
+
+
 @pytest.mark.parametrize(
     "count,size,expected_lengths",
     [
@@ -198,6 +220,55 @@ def test_main_writes_result_out_even_when_check_run_publication_fails(tmp_path, 
     result = json.loads(result_path.read_text())
     assert result["check_run_url"] is None
     assert result["total_new_findings"] == 1
+
+
+def test_main_result_includes_empty_unanalyzed_languages_by_default(tmp_path, monkeypatch):
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))
+
+    monkeypatch.setattr(apply_policy, "create_check_run", lambda *a, **k: None)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+        ],
+    )
+
+    main()
+
+    result = json.loads(result_path.read_text())
+    assert result["unanalyzed_languages"] == []
+
+
+def test_main_result_carries_unanalyzed_languages_through(tmp_path, monkeypatch):
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))
+
+    monkeypatch.setattr(apply_policy, "create_check_run", lambda *a, **k: None)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+            "--unanalyzed-languages", "C#,VB.NET",
+        ],
+    )
+
+    main()
+
+    result = json.loads(result_path.read_text())
+    assert result["unanalyzed_languages"] == ["C#", "VB.NET"]
 
 
 def test_main_result_out_gets_the_check_run_url_on_success(tmp_path, monkeypatch):
