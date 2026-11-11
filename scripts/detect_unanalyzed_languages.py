@@ -50,6 +50,15 @@ consumer's own .gitignore already covers (and git doesn't recurse into a
 nested checkout with its own .git and no submodule record, such as
 .baseline-checkout); PRUNED_DIR_NAMES below is pruned explicitly either
 way, as defense in depth for exactly those two action-specific directories.
+
+Two more things the git path has to handle itself, since plain
+`git ls-files -co` doesn't: a populated git submodule (`git ls-files`
+only ever lists its gitlink entry, never its contents - see
+`_git_submodule_relpaths`), and a filename containing a byte that isn't
+valid UTF-8 (git itself is byte-transparent; `-z` output is decoded with
+`os.fsdecode`'s surrogateescape handling, the same treatment `os.walk`'s
+paths already get from the OS on the plain-walk fallback, rather than
+crashing the whole detection step over one odd filename).
 """
 import argparse
 import os
@@ -159,13 +168,48 @@ def _glob_to_regex(pattern):
     return re.compile(f"^{''.join(regex)}$")
 
 
+def _git_submodule_relpaths(base_dir):
+    """Return the relative paths (within `base_dir`) of git submodule
+    gitlink entries - `git ls-files -s` marks these with mode `160000`
+    instead of a regular blob mode, confirmed empirically (format:
+    `<mode> <sha> <stage>\\t<path>`, NUL-terminated records under `-z`).
+    Plain `git ls-files -co` lists the gitlink path itself but never its
+    contents - `--recurse-submodules` can't be combined with `-o`, the
+    untracked-file flag the main listing needs - so a submodule's files
+    would otherwise never be seen at all. Same PRUNED_DIR_NAMES pathspec
+    excludes as the main listing, so a submodule living inside e.g.
+    `.baseline-checkout` is never surfaced either. Returns [] (not None)
+    on any git failure - a submodule-detection problem should degrade to
+    "no submodules found", not abort the whole listing."""
+    try:
+        listing = subprocess.run(
+            ["git", "-C", base_dir, "ls-files", "-s", "-z", "--", ".", *_PRUNED_DIR_PATHSPECS],
+            capture_output=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    relpaths = []
+    for entry in listing.stdout.split(b"\0"):
+        if not entry:
+            continue
+        meta, _, path = entry.partition(b"\t")
+        mode = meta.split(b" ", 1)[0]
+        if mode == b"160000":
+            relpaths.append(os.fsdecode(path))
+    return relpaths
+
+
 def _git_candidate_relpaths(base_dir):
     """Ask git for every file git itself would consider part of the
     working tree under `base_dir`: tracked (`-c`) or
     untracked-but-not-gitignored (`-o --exclude-standard`), already
     relative to `base_dir` (`git -C <dir>` prints paths relative to the
     given directory, not the repo root - confirmed empirically), with
-    PRUNED_DIR_NAMES excluded via pathspec rather than filtered afterward.
+    PRUNED_DIR_NAMES excluded via pathspec rather than filtered afterward,
+    plus the contents of any populated git submodule (see
+    _git_submodule_relpaths), prefixed with the submodule's own relative
+    path so .sastrc/.sastignore exclusions (matched against that combined
+    path) still apply to vendored submodule content.
 
     This is what keeps a consumer's own gitignored node_modules/, .venv/,
     vendored SDKs etc. out of the extension scan for free - the plain
@@ -189,13 +233,32 @@ def _git_candidate_relpaths(base_dir):
         return None
 
     try:
+        # No text=True here: `-z` output is raw bytes, and a filename
+        # containing a byte that isn't valid UTF-8 would otherwise raise
+        # UnicodeDecodeError straight out of subprocess's own text-mode
+        # decoding - a scan that passes today must not start failing over
+        # an odd filename (run_scan.sh has `set -e`). os.fsdecode decodes
+        # with surrogateescape, the same handling os.walk's path already
+        # gets for free from the OS.
         listing = subprocess.run(
             ["git", "-C", base_dir, "ls-files", "-co", "--exclude-standard", "-z", "--", ".", *_PRUNED_DIR_PATHSPECS],
-            capture_output=True, text=True, check=True,
+            capture_output=True, check=True,
         )
     except (OSError, subprocess.CalledProcessError):
         return None
-    return [p for p in listing.stdout.split("\0") if p]
+    relpaths = [os.fsdecode(p) for p in listing.stdout.split(b"\0") if p]
+
+    for submodule_relpath in _git_submodule_relpaths(base_dir):
+        submodule_abs = os.path.join(base_dir, submodule_relpath)
+        if not os.path.isdir(submodule_abs) or not os.listdir(submodule_abs):
+            # Not initialized/populated yet (`git submodule update --init`
+            # never ran) - nothing on disk to scan, and nothing to crash
+            # on either.
+            continue
+        relpaths.extend(
+            f"{submodule_relpath}/{inner}" for inner in _candidate_relpaths(submodule_abs)
+        )
+    return relpaths
 
 
 def _walk_candidate_relpaths(base_dir):

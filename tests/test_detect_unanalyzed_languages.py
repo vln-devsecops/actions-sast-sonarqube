@@ -1,3 +1,4 @@
+import os
 import subprocess
 
 import pytest
@@ -17,6 +18,34 @@ def _init_repo(path):
     _git("init", "-q", cwd=path)
     _git("config", "user.email", "test@example.com", cwd=path)
     _git("config", "user.name", "Test", cwd=path)
+
+
+def _rev_parse_head(path):
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=path, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _register_gitlink(outer_path, submodule_relpath, sha):
+    """Register a 160000 (gitlink) index entry without touching the
+    working tree - `git update-index --cacheinfo` only writes the index,
+    so this works whether or not anything actually exists on disk at
+    submodule_relpath, exactly like a real unpopulated submodule."""
+    _git("update-index", "--add", "--cacheinfo", f"160000,{sha},{submodule_relpath}", cwd=outer_path)
+
+
+def _make_populated_submodule(outer_path, submodule_relpath, filename="x.cpp"):
+    """Create a real nested git repo on disk at submodule_relpath and
+    register it as a gitlink in outer_path's index - mirrors what a real,
+    initialized `git submodule` looks like, without needing network
+    access (no `git submodule add`, which needs a transport)."""
+    submodule_abs = outer_path / submodule_relpath
+    submodule_abs.mkdir(parents=True)
+    _init_repo(submodule_abs)
+    _touch(submodule_abs / filename)
+    _git("add", "-A", cwd=submodule_abs)
+    _git("commit", "-q", "-m", "init", cwd=submodule_abs)
+    _register_gitlink(outer_path, submodule_relpath, _rev_parse_head(submodule_abs))
 
 CSHARP_WARN_LINE = (
     "WARN  Your project contains C# files which cannot be analyzed with the "
@@ -357,6 +386,120 @@ def test_detect_extension_languages_in_git_repo_still_honors_sastrc_exclusions(t
     _touch(tmp_path / "native.c")
     result = detect_extension_languages(tmp_path, exclude_patterns=["**/vendor/**"])
     assert result == ["C"]
+
+
+# --- detect_extension_languages: non-UTF-8 filenames --------------------
+
+
+def test_detect_extension_languages_in_git_repo_handles_non_utf8_filename(tmp_path):
+    """`git ls-files -z` emits raw bytes - a filename containing a byte
+    that isn't valid UTF-8 (reproduced here exactly as $'bad\\xff.cpp'
+    would appear in a shell) must not crash detection with a
+    UnicodeDecodeError. A scan that passes today must not start failing
+    just because of an odd filename - run_scan.sh has `set -e`."""
+    _init_repo(tmp_path)
+    bad_path = os.path.join(os.fsencode(str(tmp_path)), b"bad\xffname.cpp")
+    with open(bad_path, "wb") as f:
+        f.write(b"// stub\n")
+    assert detect_extension_languages(tmp_path) == ["C++"]
+
+
+def test_detect_extension_languages_falls_back_to_walk_also_handles_non_utf8_filename(tmp_path):
+    """Same guarantee outside a git work tree - os.walk already
+    surrogate-escapes invalid filename bytes on POSIX, so this should
+    hold without any extra handling, but confirm it explicitly."""
+    bad_path = os.path.join(os.fsencode(str(tmp_path)), b"bad\xffname.cpp")
+    with open(bad_path, "wb") as f:
+        f.write(b"// stub\n")
+    assert detect_extension_languages(tmp_path) == ["C++"]
+
+
+# --- detect_extension_languages: git submodules --------------------------
+
+
+def test_detect_extension_languages_finds_files_in_a_populated_submodule(tmp_path):
+    """`git ls-files` lists a submodule's own gitlink entry, never its
+    contents (and --recurse-submodules can't combine with the -o flag
+    the main listing needs for untracked-but-not-ignored files) - a
+    populated submodule must still be walked."""
+    _init_repo(tmp_path)
+    _touch(tmp_path / "app.py")
+    _make_populated_submodule(tmp_path, "vendor/sub")
+    assert detect_extension_languages(tmp_path) == ["C++"]
+
+
+def test_detect_extension_languages_handles_an_unpopulated_submodule(tmp_path):
+    """Before `git submodule update --init`, the gitlink is registered
+    in the index but the directory on disk is empty (or absent) - must
+    not crash, and must report nothing for it."""
+    _init_repo(tmp_path)
+    _touch(tmp_path / "native.c")
+    (tmp_path / "vendor" / "unpop").mkdir(parents=True)
+    _register_gitlink(tmp_path, "vendor/unpop", "1234567890abcdef1234567890abcdef12345678")
+    assert detect_extension_languages(tmp_path) == ["C"]
+
+
+def test_detect_extension_languages_handles_a_missing_submodule_directory(tmp_path):
+    """A gitlink entry whose directory doesn't exist on disk at all
+    (e.g. a shallow/partial checkout) must not crash either."""
+    _init_repo(tmp_path)
+    _touch(tmp_path / "native.c")
+    _register_gitlink(tmp_path, "vendor/missing", "1234567890abcdef1234567890abcdef12345678")
+    assert detect_extension_languages(tmp_path) == ["C"]
+
+
+def test_detect_extension_languages_degrades_to_no_submodules_when_submodule_listing_fails(tmp_path, monkeypatch):
+    """The main `ls-files -co` listing can succeed while the separate
+    `ls-files -s` submodule probe fails (e.g. a git version quirk) -
+    that should degrade to "no submodules found", not abort the whole
+    (otherwise-successful) listing."""
+    import subprocess as subprocess_module
+
+    import detect_unanalyzed_languages as dul
+
+    _init_repo(tmp_path)
+    _touch(tmp_path / "native.c")
+    _make_populated_submodule(tmp_path, "vendor/sub")
+
+    real_run = dul.subprocess.run
+
+    def fake_run(args, **kwargs):
+        if "-s" in args and "ls-files" in args:
+            raise subprocess_module.CalledProcessError(1, args)
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(dul.subprocess, "run", fake_run)
+    assert detect_extension_languages(tmp_path) == ["C"]
+
+
+def test_detect_extension_languages_submodule_contents_honor_sastignore_exclusion(tmp_path):
+    """A submodule's files are prefixed with the submodule's own relative
+    path before exclusion matching, so a consumer can exclude a whole
+    vendored submodule via .sastrc/.sastignore the same way as any other
+    directory."""
+    _init_repo(tmp_path)
+    _touch(tmp_path / "native.c")
+    _make_populated_submodule(tmp_path, "vendor/sub")
+    result = detect_extension_languages(tmp_path, exclude_patterns=["**/vendor/**"])
+    assert result == ["C"]
+
+
+def test_detect_extension_languages_nested_submodule_is_also_found(tmp_path):
+    """A submodule containing its own submodule: the recursive
+    _candidate_relpaths call inside a populated submodule naturally
+    picks up a further-nested gitlink too."""
+    _init_repo(tmp_path)
+    submodule_abs = tmp_path / "vendor" / "sub"
+    submodule_abs.mkdir(parents=True)
+    _init_repo(submodule_abs)
+    _touch(submodule_abs / "outer.cpp")
+    _git("add", "-A", cwd=submodule_abs)
+    _git("commit", "-q", "-m", "init", cwd=submodule_abs)
+    _make_populated_submodule(submodule_abs, "inner", filename="Deep.swift")
+    _git("add", "-A", cwd=submodule_abs)
+    _git("commit", "-q", "-m", "add inner submodule", cwd=submodule_abs)
+    _register_gitlink(tmp_path, "vendor/sub", _rev_parse_head(submodule_abs))
+    assert detect_extension_languages(tmp_path) == ["C++", "Swift"]
 
 
 # --- detect_unanalyzed_languages (combined) -----------------------------
