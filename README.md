@@ -128,6 +128,13 @@ C++, Objective-C, or Swift (so it never even indexes or logs about them;
 scan that looks clean - zero findings - while actually saying nothing
 about those files at all.
 
+`.m` is ambiguous beyond Objective-C - MATLAB and Mercury both use it too
+- so a repo containing either can get a false "Objective-C not analyzed"
+report. There's no Community Build plugin for either language to cross-check
+against, so this is a known, accepted false-positive rather than something
+`detect_unanalyzed_languages.py` can resolve by content-sniffing a `.m`
+file; exclude such files via `.sastignore` if this comes up.
+
 Whenever this scan detects any of these languages, it says so **everywhere
 a clean result could otherwise appear**: a `::warning::` annotation and a
 job summary entry from this action itself, a banner at the top of the

@@ -183,6 +183,12 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
         default="",
         help="Comma-separated list of languages this scan could not analyze (see detect_unanalyzed_languages.py); empty when none",
     )
+    parser.add_argument(
+        "--fail-on-unanalyzed",
+        default="false",
+        choices=["true", "false"],
+        help="Mirrors the action's fail-on-unanalyzed-languages input - when true and --unanalyzed-languages is non-empty, the Check Run concludes 'failure' too, not just the workflow job",
+    )
     parser.add_argument("--result-out", required=True, help="Path to write the policy result JSON to")
     args = parser.parse_args()
 
@@ -198,8 +204,17 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
     blocking_findings = [f for f in findings if severity_at_least(severity_of(f), args.threshold)]
     blocked = blocking_enabled and bool(blocking_findings)
     unanalyzed_languages = [lang for lang in args.unanalyzed_languages.split(",") if lang]
+    fail_on_unanalyzed = args.fail_on_unanalyzed == "true"
 
     if blocked:
+        conclusion = "failure"
+    elif fail_on_unanalyzed and unanalyzed_languages:
+        # A protected branch's required-status-check gate reads this Check
+        # Run's own `conclusion`, not the workflow job's overall pass/fail -
+        # sonar-pr.yml's own "Scan PR head" step already fails the job (see
+        # action.yml's fail-on-unanalyzed-languages), but that alone doesn't
+        # stop a branch rule that requires *this named check* from still
+        # seeing "success" and letting the PR merge.
         conclusion = "failure"
     elif findings:
         conclusion = "neutral"

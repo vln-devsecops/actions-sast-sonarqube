@@ -66,11 +66,13 @@ rm -rf "${ABS_PROJECT_BASE_DIR}/.scannerwork"
 # executable; falling back to /tmp keeps this script working unchanged
 # outside Actions (e.g. a manual local run), where that risk doesn't apply.
 SCANNER_CACHE_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/sonar-scanner-cache.XXXXXX")"
-EXTRA_ARGS_FILE="$(mktemp)"
-# Same RUNNER_TEMP-not-/tmp reasoning as SCANNER_CACHE_DIR above - these two
-# are plain text files (no exec involved), but keeping every scratch file
-# this script creates under one scratch root avoids depending on /tmp being
-# writable at all on a locked-down runner.
+# EXTRA_ARGS_FILE/SCANNER_LOG_FILE/UNANALYZED_LANGUAGES_FILE are plain text
+# (no exec involved, unlike SCANNER_CACHE_DIR's bundled-JRE concern above),
+# but rooted under the same RUNNER_TEMP-not-bare-/tmp scratch root anyway:
+# a locked-down runner is free to make /tmp unwritable too, not just
+# noexec, and keeping every scratch file this script creates under one
+# root avoids depending on /tmp being usable at all.
+EXTRA_ARGS_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/sonar-extra-args.XXXXXX")"
 SCANNER_LOG_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/sonar-scanner-log.XXXXXX")"
 UNANALYZED_LANGUAGES_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/sonar-unanalyzed-languages.XXXXXX")"
 trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}" "${SCANNER_LOG_FILE}" "${UNANALYZED_LANGUAGES_FILE}"' EXIT

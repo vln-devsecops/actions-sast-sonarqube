@@ -300,17 +300,20 @@ jobs:
       # the Check Run annotations already cover inline-on-diff) - the
       # SonarQube instance is ephemeral and torn down at the end of this
       # job, so this is the durable place to see exact locations without
-      # re-running the scan. `if: always()` so it still uploads even if a
-      # later step (diff, policy) fails - the report itself is already
-      # complete once the scan succeeds. Checking the findings-report
-      # *output* rather than head-scan's outcome: the action's own
+      # re-running the scan. `!cancelled()` (not `always()`) so it still
+      # uploads even if a later step (diff, policy) fails - the report
+      # itself is already complete once the scan succeeds - but a manual
+      # workflow cancellation still skips it, matching this step's
+      # pre-existing behavior rather than racing a cancellation to upload
+      # a possibly-incomplete report. Checking the findings-report *output*
+      # rather than head-scan's outcome: the action's own
       # fail-on-unanalyzed-languages (see action.yml) deliberately fails
       # the "Scan PR head" step itself *after* findings-json/findings-report
       # are written, so outcome alone can no longer tell "never produced a
       # report" apart from "produced one, then failed on purpose".
       - name: Upload PR head findings report
         id: upload-report
-        if: always() && steps.head-scan.outputs.findings-report != ''
+        if: "!cancelled() && steps.head-scan.outputs.findings-report != ''"
         uses: actions/upload-artifact@v7
         with:
           name: sonar-pr-${{ github.event.pull_request.number }}-findings-report
@@ -331,9 +334,12 @@ jobs:
       # fail-on-unanalyzed-languages failure in "Scan PR head" must not
       # skip the diff/policy/comment steps below - they're how that result
       # reaches the Check Run and PR comment, not just the job summary.
+      # `!cancelled()`, not `always()`: a manual cancellation should still
+      # skip these rather than race to finish a diff/policy run against a
+      # scan that was deliberately cut short.
       - name: Resolve baseline findings file
         id: baseline-findings
-        if: always() && steps.head-scan.outputs.findings-report != ''
+        if: "!cancelled() && steps.head-scan.outputs.findings-report != ''"
         env:
           TIER_A_FOUND: ${{ steps.tier-a.outputs.found }}
           TIER_B_FOUND: ${{ steps.tier-b.outputs.found }}
@@ -374,7 +380,7 @@ jobs:
 
       - name: Diff findings
         id: diff
-        if: always() && steps.head-scan.outputs.findings-report != ''
+        if: "!cancelled() && steps.head-scan.outputs.findings-report != ''"
         env:
           BASELINE_FINDINGS: ${{ steps.baseline-findings.outputs.path }}
           HEAD_FINDINGS: ${{ steps.head-scan.outputs.findings-json }}
@@ -390,7 +396,7 @@ jobs:
 
       - name: Apply blocking policy
         id: policy
-        if: always() && steps.head-scan.outputs.findings-report != ''
+        if: "!cancelled() && steps.head-scan.outputs.findings-report != ''"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -400,6 +406,7 @@ jobs:
           BLOCKING: ${{ inputs.blocking }}
           CHECK_NAME: ${{ inputs.check-name }}
           UNANALYZED_LANGUAGES: ${{ steps.head-scan.outputs.unanalyzed-languages }}
+          FAIL_ON_UNANALYZED: ${{ inputs.fail-on-unanalyzed-languages }}
         run: |
           set -o pipefail
           # GitHub downgrades GITHUB_TOKEN to read-only for a pull_request
@@ -420,6 +427,7 @@ jobs:
               --sha "$HEAD_SHA" \
               --check-name "$CHECK_NAME" \
               --unanalyzed-languages "$UNANALYZED_LANGUAGES" \
+              --fail-on-unanalyzed "$FAIL_ON_UNANALYZED" \
               --result-out policy-result.json
           } | tee -a "$GITHUB_STEP_SUMMARY"
 

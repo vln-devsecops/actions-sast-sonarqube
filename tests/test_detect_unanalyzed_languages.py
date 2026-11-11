@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 
 from detect_unanalyzed_languages import (
@@ -5,6 +7,16 @@ from detect_unanalyzed_languages import (
     detect_unanalyzed_languages,
     parse_scanner_log,
 )
+
+
+def _git(*args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def _init_repo(path):
+    _git("init", "-q", cwd=path)
+    _git("config", "user.email", "test@example.com", cwd=path)
+    _git("config", "user.name", "Test", cwd=path)
 
 CSHARP_WARN_LINE = (
     "WARN  Your project contains C# files which cannot be analyzed with the "
@@ -57,6 +69,49 @@ def test_parse_scanner_log_matches_only_within_the_full_fixed_sentence():
     """A line that merely mentions 'cannot be analyzed' in some unrelated
     context must not be mistaken for the real warning."""
     log = "WARN  Something else entirely cannot be analyzed today.\n"
+    assert parse_scanner_log(log) == []
+
+
+def test_parse_scanner_log_matches_a_real_timestamped_line():
+    """Real scanner output is prefixed with a timestamp, e.g.
+    '21:36:22.088 WARN  Your project contains ...' - confirm the anchored
+    pattern still matches that shape, not just a bare 'WARN ...' line."""
+    log = (
+        "21:36:22.088 WARN  Your project contains C# files which cannot be "
+        "analyzed with the scanner you are using. To analyze C# or VB.NET, "
+        "you must use the SonarScanner for .NET 5.x or higher, see "
+        "https://redirect.sonarsource.com/doc/install-configure-scanner-msbuild.html"
+    )
+    assert parse_scanner_log(log) == ["C#"]
+
+
+def test_parse_scanner_log_rejects_markdown_link_injection():
+    """A captured 'language' name flows into the ::warning:: annotation,
+    the findings report, the Check Run summary and the PR comment - all
+    Markdown-rendered surfaces. A crafted log line must not let an
+    attacker smuggle a Markdown link through as a 'language'."""
+    log = "WARN  Your project contains [x](https://e.vil) files which cannot be analyzed with the scanner you are using.\n"
+    assert parse_scanner_log(log) == []
+
+
+def test_parse_scanner_log_rejects_mention_injection():
+    log = "WARN  Your project contains @org/team files which cannot be analyzed with the scanner you are using.\n"
+    assert parse_scanner_log(log) == []
+
+
+def test_parse_scanner_log_rejects_a_comma_in_the_name():
+    """A comma would otherwise let a crafted line smuggle in a second,
+    attacker-chosen 'language' entry disguised as part of one match."""
+    log = "WARN  Your project contains C#, VB.NET files which cannot be analyzed with the scanner you are using.\n"
+    assert parse_scanner_log(log) == []
+
+
+def test_parse_scanner_log_rejects_a_warn_sentence_not_at_the_start_of_a_line():
+    """The real line is always `<timestamp> WARN  ...` - a single token
+    before WARN. A line where the sentence is buried after multiple other
+    words must not match, even though the substring is byte-for-byte the
+    real sentence."""
+    log = "noisy prefix WARN  Your project contains C# files which cannot be analyzed with the scanner you are using.\n"
     assert parse_scanner_log(log) == []
 
 
@@ -122,6 +177,22 @@ def test_detect_extension_languages_ignores_sonarqube_directory(tmp_path):
     assert detect_extension_languages(tmp_path) == []
 
 
+def test_detect_extension_languages_ignores_baseline_checkout_directory(tmp_path):
+    """sonar-pr.yml's fallback baseline scan checks out the target branch
+    into .baseline-checkout alongside the repo root - when
+    project-base-dir is '.', that directory must not be treated as the
+    PR's own project source."""
+    _touch(tmp_path / ".baseline-checkout" / "leftover.cpp")
+    assert detect_extension_languages(tmp_path) == []
+
+
+def test_detect_extension_languages_ignores_sast_sonarqube_directory(tmp_path):
+    """sonar-pr.yml/sonar-baseline.yml check out this action's own source
+    into .sast-sonarqube alongside the repo root."""
+    _touch(tmp_path / ".sast-sonarqube" / "scripts" / "run_scan.sh.cpp")
+    assert detect_extension_languages(tmp_path) == []
+
+
 def test_detect_extension_languages_sorts_and_dedupes_results(tmp_path):
     _touch(tmp_path / "a.swift")
     _touch(tmp_path / "b.swift")
@@ -178,6 +249,114 @@ def test_detect_extension_languages_anchored_exclusion_pattern(tmp_path):
     _touch(tmp_path / "nested" / "excluded" / "keep.swift")
     result = detect_extension_languages(tmp_path, exclude_patterns=["excluded/**"])
     assert result == ["Swift"]
+
+
+# --- detect_extension_languages: inside a real git work tree -----------
+#
+# project-base-dir in the real sonar-pr.yml/sonar-baseline.yml workflows is
+# always a checked-out git work tree, so these exercise the git-ls-files
+# fast path (_candidate_relpaths) directly, not just the plain-walk
+# fallback the tmp_path-only tests above exercise (pytest's tmp_path is
+# never itself inside a git repo).
+
+
+def test_detect_extension_languages_in_git_repo_honors_gitignore(tmp_path):
+    """node-gyp-style native addons under a gitignored node_modules/ (or a
+    gitignored .venv/, vendored SDK, etc.) must not be reported - the
+    consumer's own .gitignore already says this isn't their project
+    source."""
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("node_modules/\n")
+    _touch(tmp_path / "node_modules" / "native-addon" / "binding.cc")
+    _touch(tmp_path / "app" / "View.swift")
+    assert detect_extension_languages(tmp_path) == ["Swift"]
+
+
+def test_detect_extension_languages_in_git_repo_still_finds_ungitignored_files(tmp_path):
+    """Confirms the git fast path doesn't just report nothing - an
+    untracked, not-ignored file is still found."""
+    _init_repo(tmp_path)
+    _touch(tmp_path / "native.cpp")
+    assert detect_extension_languages(tmp_path) == ["C++"]
+
+
+def test_detect_extension_languages_in_git_repo_prunes_baseline_checkout_even_if_not_gitignored(tmp_path):
+    """Defense in depth: .baseline-checkout must be pruned even when the
+    consumer's own .gitignore says nothing about it (it's this action's
+    own workflow scratch directory, not the consumer's concern)."""
+    _init_repo(tmp_path)
+    _touch(tmp_path / ".baseline-checkout" / "leftover.cpp")
+    _touch(tmp_path / "native.c")
+    assert detect_extension_languages(tmp_path) == ["C"]
+
+
+def test_detect_extension_languages_in_git_repo_prunes_sast_sonarqube_even_if_not_gitignored(tmp_path):
+    _init_repo(tmp_path)
+    _touch(tmp_path / ".sast-sonarqube" / "fixtures" / "leftover.swift")
+    _touch(tmp_path / "native.c")
+    assert detect_extension_languages(tmp_path) == ["C"]
+
+
+def test_detect_extension_languages_does_not_descend_into_a_nested_git_repo(tmp_path):
+    """An untracked nested repo (e.g. .baseline-checkout, created by
+    `actions/checkout` with its own .git) is exactly what sonar-pr.yml
+    leaves behind. git itself doesn't recurse into an embedded repository
+    with no submodule record, so the outer `git ls-files` run from
+    project-base-dir never sees its contents - confirmed empirically."""
+    _init_repo(tmp_path)
+    _touch(tmp_path / "native.c")
+    nested = tmp_path / "some-other-nested-repo"
+    _touch(nested / "inner.cpp")
+    _init_repo(nested)
+    assert detect_extension_languages(tmp_path) == ["C"]
+
+
+def test_detect_extension_languages_falls_back_to_walk_when_git_binary_is_missing(tmp_path, monkeypatch):
+    """If git itself can't be invoked (not installed, PATH issue, ...),
+    fall back to the plain walk rather than erroring out the whole
+    detection step over a missing optimization."""
+    import detect_unanalyzed_languages as dul
+
+    _init_repo(tmp_path)
+    _touch(tmp_path / "native.c")
+
+    def fake_run(*args, **kwargs):
+        raise OSError("git not found")
+
+    monkeypatch.setattr(dul.subprocess, "run", fake_run)
+    assert detect_extension_languages(tmp_path) == ["C"]
+
+
+def test_detect_extension_languages_falls_back_to_walk_when_ls_files_fails(tmp_path, monkeypatch):
+    """`rev-parse` can report "true" while `ls-files` itself still fails
+    (e.g. a corrupt index) - fall back rather than crash."""
+    import subprocess as subprocess_module
+
+    import detect_unanalyzed_languages as dul
+
+    _init_repo(tmp_path)
+    _touch(tmp_path / "native.c")
+
+    real_run = dul.subprocess.run
+
+    def fake_run(args, **kwargs):
+        if "ls-files" in args:
+            raise subprocess_module.CalledProcessError(1, args)
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(dul.subprocess, "run", fake_run)
+    assert detect_extension_languages(tmp_path) == ["C"]
+
+
+def test_detect_extension_languages_in_git_repo_still_honors_sastrc_exclusions(tmp_path):
+    """The git fast path must not bypass the consumer's own
+    .sastrc/.sastignore exclusions - only the fixed PRUNED_DIR_NAMES and
+    whatever their own .gitignore already covers."""
+    _init_repo(tmp_path)
+    _touch(tmp_path / "vendor" / "lib.cpp")
+    _touch(tmp_path / "native.c")
+    result = detect_extension_languages(tmp_path, exclude_patterns=["**/vendor/**"])
+    assert result == ["C"]
 
 
 # --- detect_unanalyzed_languages (combined) -----------------------------
