@@ -108,6 +108,13 @@ def test_render_report_banner_says_findings_say_nothing_about_them():
     assert "says nothing" in report.lower() or "say nothing" in report.lower()
 
 
+def test_render_report_banner_wording_is_scanner_mode_neutral():
+    # In scanner-mode: dotnet the cause is the build, not sonar-scanner-cli.
+    report = render_report([], "p", unanalyzed_languages=["C#"])
+    assert "sonar-scanner-cli" not in report
+    assert "build-command" in report
+
+
 def test_render_report_banner_appears_before_the_findings_table():
     findings = [make_finding()]
     report = render_report(findings, "p", unanalyzed_languages=["Swift"])

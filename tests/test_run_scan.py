@@ -96,18 +96,39 @@ if [[ "$step" == "begin" ]]; then
 fi
 mode="${FAKE_END_MODE:-ok}"
 [[ "$mode" == "fail" ]] && { echo "Post-processing failed. Exit code: 1"; exit 1; }
+if [[ "$mode" == "noanalyzable" ]]; then
+  echo "No analyzable projects were found. SonarQube analysis will not be performed."
+  echo "Post-processing failed. Exit code: 1"
+  exit 1
+fi
 out=.sonarqube/out
-mkdir -p "$out/0" "$out/.sonar"
-cat > "$out/0/ProjectInfo.xml" <<'XML'
+mkdir -p "$out/0" "$out/.sonar" .sonarqube/conf/0
+# The real listing starts with a UTF-8 BOM; Program.cs is the only file the
+# "build" compiled.
+printf '\xef\xbb\xbf%s\n' "$PWD/Program.cs" > .sonarqube/conf/0/FilesToAnalyze.txt
+cat > "$out/0/ProjectInfo.xml" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <ProjectInfo xmlns="http://www.sonarsource.com/msbuild/integration/2015/1">
   <ProjectName>Tiny.Core</ProjectName>
   <ProjectGuid>742e96f3-4aee-28a3-3120-ce8630155aa7</ProjectGuid>
   <FullPath>/w/Tiny.Core/Tiny.Core.csproj</FullPath>
   <IsExcluded>false</IsExcluded>
-  <AnalysisResultFiles><AnalysisResultFile Id="FilesToAnalyze" Location="x" /></AnalysisResultFiles>
+  <AnalysisResultFiles><AnalysisResultFile Id="FilesToAnalyze" Location="$PWD/.sonarqube/conf/0/FilesToAnalyze.txt" /></AnalysisResultFiles>
 </ProjectInfo>
 XML
+if [[ "$mode" == "excluded" ]]; then
+  mkdir -p "$out/1"
+  cat > "$out/1/ProjectInfo.xml" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<ProjectInfo xmlns="http://www.sonarsource.com/msbuild/integration/2015/1">
+  <ProjectName>Excluded</ProjectName>
+  <ProjectGuid>467f10aa-28ab-8c29-d665-51bb75b75902</ProjectGuid>
+  <FullPath>/w/Excluded/Excluded.csproj</FullPath>
+  <IsExcluded>true</IsExcluded>
+</ProjectInfo>
+XML
+  echo "21:03:51.291  The exclude flag has been set so the project will not be analyzed. Project file: /w/Excluded/Excluded.csproj"
+fi
 echo '{"scannerProperties":[{"key":"sonar.modules","value":"742E96F3-4AEE-28A3-3120-CE8630155AA7"}]}' > "$out/ScannerEngineInput.json"
 if [[ "$mode" == "partial" ]]; then
   mkdir -p "$out/1"
@@ -465,3 +486,91 @@ def test_dotnet_still_reports_extension_detected_languages(harness):
     result = _dotnet(harness)
     assert result.returncode == 0, result.stderr
     assert "unanalyzed-languages=C++\n" in harness.github_output.read_text()
+
+
+# --- failure-reason output --------------------------------------------------------
+# Each failure path names its cause in a `failure-reason` step output, so
+# ci.yml's bad cases can assert *why* the action failed, not just that it
+# did (a typo'd fixture path or a broken setup would fail too).
+
+
+def _output(harness, name):
+    values = [
+        line.split("=", 1)[1]
+        for line in harness.github_output.read_text().splitlines()
+        if line.startswith(f"{name}=")
+    ]
+    return values[-1] if values else None
+
+
+@pytest.mark.parametrize(
+    "overrides,reason",
+    [
+        ({"SCANNER_MODE": "msbuild"}, "invalid-scanner-mode"),
+        ({"SCANNER_MODE": "cli", "BUILD_COMMAND": "dotnet build"}, "build-command-not-allowed"),
+        ({"SCANNER_MODE": "dotnet", "BUILD_COMMAND": ""}, "build-command-required"),
+        ({"PROJECT_BASE_DIR": "/nonexistent/project"}, "project-base-dir-missing"),
+    ],
+)
+def test_failure_reason_for_input_validation(harness, overrides, reason):
+    result = harness.run(**overrides)
+    assert result.returncode != 0
+    assert _output(harness, "failure-reason") == reason
+
+
+@pytest.mark.parametrize(
+    "overrides,reason",
+    [
+        ({"BUILD_COMMAND": "exit 3"}, "build-command-failed"),
+        ({"FAKE_BEGIN_MODE": "fail"}, "begin-failed"),
+        ({"FAKE_END_MODE": "fail"}, "end-failed"),
+        ({"FAKE_END_MODE": "noanalyzable"}, "no-analyzable-projects"),
+        ({"FAKE_END_MODE": "partial"}, "project-not-built"),
+        ({"FAKE_END_MODE": "duplicate"}, "project-not-analyzed"),
+        ({"FAKE_END_MODE": "noreport"}, "no-report-task"),
+    ],
+)
+def test_failure_reason_for_dotnet_failures(harness, overrides, reason):
+    result = _dotnet(harness, **overrides)
+    assert result.returncode != 0
+    assert _output(harness, "failure-reason") == reason
+
+
+def test_failure_reason_for_rejected_sastrc(harness):
+    (harness.project / ".sastrc").write_text('tests:\n  paths: ["Tests/**"]\n')
+    result = _dotnet(harness)
+    assert result.returncode != 0
+    assert _output(harness, "failure-reason") == "invalid-sast-config"
+
+
+def test_no_failure_reason_on_success(harness):
+    assert _dotnet(harness).returncode == 0
+    assert _output(harness, "failure-reason") is None
+    assert harness.run().returncode == 0
+    assert _output(harness, "failure-reason") is None
+
+
+def test_failure_reason_also_goes_to_the_step_summary(harness):
+    summary = harness.tmp_path / "summary.md"
+    summary.write_text("")
+    result = _dotnet(harness, BUILD_COMMAND="exit 3", GITHUB_STEP_SUMMARY=str(summary))
+    assert result.returncode != 0
+    assert "build-command-failed" in summary.read_text()
+
+
+# --- dotnet mode: SonarQubeExclude and uncompiled C# ---------------------------------
+
+
+def test_dotnet_sonarqube_exclude_project_does_not_fail(harness):
+    result = _dotnet(harness, FAKE_END_MODE="excluded")
+    assert result.returncode == 0, result.stderr
+    assert "Compute engine task succeeded." in result.stdout
+
+
+def test_dotnet_reports_csharp_the_build_did_not_compile(harness):
+    (harness.project / "Unbuilt").mkdir()
+    (harness.project / "Unbuilt" / "Unbuilt.cs").write_text("class U {}\n")
+    result = _dotnet(harness)
+    # Reported, not failed - fail-on-unanalyzed-languages decides that.
+    assert result.returncode == 0, result.stderr
+    assert "unanalyzed-languages=C#\n" in harness.github_output.read_text()

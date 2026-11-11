@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -7,6 +8,8 @@ from check_dotnet_projects import (
     find_skipped_projects,
     parse_project_info,
     read_analyzed_modules,
+    read_compiled_files,
+    reason_codes,
 )
 
 # Shapes below are copied from real dotnet-sonarscanner 12.1.0 output
@@ -18,10 +21,10 @@ CORE_GUID = "742e96f3-4aee-28a3-3120-ce8630155aa7"
 TESTS_GUID = "467f10aa-28ab-8c29-d665-51bb75b75902"
 
 
-def project_info_xml(name, guid, excluded=False, files_to_analyze=True):
+def project_info_xml(name, guid, excluded=False, files_to_analyze=True, files_location="/w/.sonarqube/conf/0/FilesToAnalyze.txt"):
     files = (
         '<AnalysisResultFiles>\n'
-        '    <AnalysisResultFile Id="FilesToAnalyze" Location="/w/.sonarqube/conf/0/FilesToAnalyze.txt" />\n'
+        f'    <AnalysisResultFile Id="FilesToAnalyze" Location="{files_location}" />\n'
         '  </AnalysisResultFiles>'
         if files_to_analyze
         else "<AnalysisResultFiles />"
@@ -79,6 +82,7 @@ def test_parse_project_info_reads_the_fields_it_needs():
         "full_path": "/w/Tiny.Core/Tiny.Core.csproj",
         "excluded": False,
         "has_files_to_analyze": True,
+        "files_to_analyze": "/w/.sonarqube/conf/0/FilesToAnalyze.txt",
     }
 
 
@@ -148,8 +152,34 @@ def test_find_skipped_log_lines_clean_log():
 
 
 def test_find_skipped_log_lines_dedupes():
-    line = "WARNING: The project will not be analyzed. Project file: x"
+    line = 'WARNING: Duplicate ProjectGuid: "0". The project will not be analyzed. Project file: x'
     assert find_skipped_log_lines(f"{line}\n{line}\n") == [line]
+
+
+# Verbatim from `end` (dotnet-sonarscanner 12.1.0) for a project with
+# <SonarQubeExclude>true</SonarQubeExclude> - Sonar's documented
+# per-project exclusion. Deliberate, so it must never fail the scan.
+EXCLUDE_FLAG_LINE = (
+    "21:03:51.291  The exclude flag has been set so the project will not be analyzed. "
+    "Project file: /w/Excluded/Excluded.csproj"
+)
+
+
+def test_find_skipped_log_lines_ignores_the_sonarqube_exclude_flag():
+    assert find_skipped_log_lines(EXCLUDE_FLAG_LINE + "\n") == []
+
+
+def test_find_skipped_log_lines_only_matches_project_guid_skips():
+    assert find_skipped_log_lines("WARNING: Some other reason. The project will not be analyzed.\n") == []
+
+
+def test_find_skipped_log_lines_strips_a_bare_timestamp():
+    # A skip line with neither a WARNING: nor a Sonar: prefix still loses
+    # its leading timestamp.
+    log = "21:03:51.291  The project has an invalid ProjectGuid and will not be analyzed. Project file: x\n"
+    assert find_skipped_log_lines(log) == [
+        "The project has an invalid ProjectGuid and will not be analyzed. Project file: x"
+    ]
 
 
 # --- find_skipped_projects -----------------------------------------------------
@@ -239,8 +269,96 @@ def test_project_missing_from_analyzed_modules_is_skipped(out_dir):
 def test_log_lines_are_reported_too(out_dir):
     write_project(out_dir, 0, project_info_xml("Tiny.Core", CORE_GUID))
     write_engine_input(out_dir, [CORE_GUID])
-    problems = find_skipped_projects(out_dir, "WARNING: The project will not be analyzed. Project file: x\n")
-    assert problems == ["scanner log: WARNING: The project will not be analyzed. Project file: x"]
+    line = 'WARNING: Duplicate ProjectGuid: "0". The project will not be analyzed. Project file: x'
+    problems = find_skipped_projects(out_dir, line + "\n")
+    assert problems == [f"scanner log: {line}"]
+    assert problems[0].code == "project-not-analyzed"
+
+
+def test_sonarqube_exclude_project_passes(out_dir):
+    # The reviewer's live repro: one <SonarQubeExclude> project + one
+    # normal one. `end` logs the exclude-flag line, ProjectInfo.xml says
+    # IsExcluded=true, sonar.modules holds only the normal project.
+    write_project(out_dir, 0, project_info_xml("Normal", CORE_GUID))
+    write_project(out_dir, 1, project_info_xml("Excluded", TESTS_GUID, excluded=True))
+    write_engine_input(out_dir, [CORE_GUID])
+    assert find_skipped_projects(out_dir, EXCLUDE_FLAG_LINE + "\n") == []
+
+
+# --- failure reason codes -------------------------------------------------------
+
+
+def test_reason_code_project_not_built(out_dir):
+    write_project(out_dir, 0, project_info_xml("Tiny.Core", CORE_GUID))
+    write_project(out_dir, 1)
+    write_engine_input(out_dir, [CORE_GUID])
+    assert [p.code for p in find_skipped_projects(out_dir, "")] == ["project-not-built"]
+
+
+def test_reason_code_project_not_analyzed(out_dir):
+    write_project(out_dir, 0, project_info_xml("A", CORE_GUID))
+    write_project(out_dir, 1, project_info_xml("B", TESTS_GUID))
+    write_engine_input(out_dir, [CORE_GUID])
+    assert [p.code for p in find_skipped_projects(out_dir, "")] == ["project-not-analyzed"]
+
+
+def test_reason_code_malformed_project_info(out_dir):
+    write_project(out_dir, 0, "<ProjectInfo>")
+    write_project(out_dir, 1, project_info_xml("Tiny.Core", CORE_GUID))
+    write_engine_input(out_dir, [CORE_GUID])
+    assert [p.code for p in find_skipped_projects(out_dir, "")] == ["project-not-analyzed"]
+
+
+@pytest.mark.parametrize("setup", ["missing-out", "missing-engine-input", "empty-modules"])
+def test_reason_code_no_analysis_output(tmp_path, out_dir, setup):
+    target = out_dir
+    if setup == "missing-out":
+        target = tmp_path / "nope"
+    elif setup == "empty-modules":
+        write_engine_input(out_dir, [])
+    assert [p.code for p in find_skipped_projects(target, "")] == ["no-analysis-output"]
+
+
+def test_reason_codes_are_sorted_and_unique(out_dir):
+    write_project(out_dir, 0, project_info_xml("A", CORE_GUID))
+    write_project(out_dir, 1)
+    write_project(out_dir, 2)
+    write_project(out_dir, 3, project_info_xml("B", TESTS_GUID))
+    write_engine_input(out_dir, [CORE_GUID])
+    assert reason_codes(find_skipped_projects(out_dir, "")) == "project-not-analyzed,project-not-built"
+    assert reason_codes([]) == ""
+
+
+# --- read_compiled_files ------------------------------------------------------------
+
+
+def _with_files_to_analyze(tmp_path, out_dir, index, name, guid, files, excluded=False):
+    conf = tmp_path / ".sonarqube" / "conf" / str(index)
+    conf.mkdir(parents=True)
+    listing = conf / "FilesToAnalyze.txt"
+    # The real file starts with a UTF-8 BOM.
+    listing.write_bytes(b"\xef\xbb\xbf" + "\n".join(str(f) for f in files).encode() + b"\n")
+    write_project(out_dir, index, project_info_xml(name, guid, excluded=excluded, files_location=str(listing)))
+
+
+def test_read_compiled_files_unions_every_project_including_excluded(tmp_path, out_dir):
+    a = tmp_path / "A" / "A.cs"
+    b = tmp_path / "B" / "B.cs"
+    _with_files_to_analyze(tmp_path, out_dir, 0, "A", CORE_GUID, [a])
+    _with_files_to_analyze(tmp_path, out_dir, 1, "B", TESTS_GUID, [b], excluded=True)
+    assert read_compiled_files(out_dir) == {os.path.realpath(a), os.path.realpath(b)}
+
+
+def test_read_compiled_files_skips_projects_without_a_listing(tmp_path, out_dir):
+    write_project(out_dir, 0, project_info_xml("Empty", CORE_GUID, files_to_analyze=False))
+    write_project(out_dir, 1, project_info_xml("Gone", TESTS_GUID, files_location=str(tmp_path / "missing.txt")))
+    write_project(out_dir, 2)
+    write_project(out_dir, 3, "<ProjectInfo>")
+    assert read_compiled_files(out_dir) == set()
+
+
+def test_read_compiled_files_missing_out_dir(tmp_path):
+    assert read_compiled_files(tmp_path / "nope") == set()
 
 
 def test_project_with_no_files_to_analyze_is_not_a_skip(out_dir):
