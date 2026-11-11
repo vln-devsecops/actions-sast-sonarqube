@@ -48,30 +48,43 @@ SCANNER_MODE="${SCANNER_MODE:-cli}"
 BUILD_COMMAND="${BUILD_COMMAND:-}"
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# fail <reason-code> <message>: print the message, record the reason code
+# as the `failure-reason` step output (and in the job summary), exit 1.
+# The code is a fixed token chosen by this script, never caller text, so
+# callers - ci.yml's bad cases in particular - can assert *why* the scan
+# failed, not just that it did.
+fail() {
+  local reason="$1" message="$2"
+  echo "$message" >&2
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    echo "failure-reason=${reason}" >> "$GITHUB_OUTPUT"
+  fi
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    echo "### SonarQube scan failed: \`${reason}\`" >> "$GITHUB_STEP_SUMMARY"
+  fi
+  exit 1
+}
+
 case "$SCANNER_MODE" in
   cli)
     # Silently ignoring it would let a caller believe their C# was built
     # and analyzed when the plain CLI never even ran their build.
     if [[ -n "$BUILD_COMMAND" ]]; then
-      echo "build-command is only used with scanner-mode: dotnet (scanner-mode is cli)." >&2
-      exit 1
+      fail build-command-not-allowed "build-command is only used with scanner-mode: dotnet (scanner-mode is cli)."
     fi
     ;;
   dotnet)
     if [[ -z "$BUILD_COMMAND" ]]; then
-      echo "build-command is required when scanner-mode is dotnet." >&2
-      exit 1
+      fail build-command-required "build-command is required when scanner-mode is dotnet."
     fi
     ;;
   *)
-    echo "scanner-mode must be 'cli' or 'dotnet', got '${SCANNER_MODE}'." >&2
-    exit 1
+    fail invalid-scanner-mode "scanner-mode must be 'cli' or 'dotnet', got '${SCANNER_MODE}'."
     ;;
 esac
 
 if [[ ! -d "$PROJECT_BASE_DIR" ]]; then
-  echo "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' does not exist or is not a directory." >&2
-  exit 1
+  fail project-base-dir-missing "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' does not exist or is not a directory."
 fi
 ABS_PROJECT_BASE_DIR="$(cd "$PROJECT_BASE_DIR" && pwd)"
 
@@ -135,7 +148,9 @@ fi
 if [[ "$SCANNER_MODE" == "dotnet" ]]; then
   build_scan_config_args+=(--scanner-mode dotnet)
 fi
-python3 "${SCRIPTS_DIR}/build_scan_config.py" "${build_scan_config_args[@]}"
+if ! python3 "${SCRIPTS_DIR}/build_scan_config.py" "${build_scan_config_args[@]}"; then
+  fail invalid-sast-config "Rejected the SAST config (see the error above)."
+fi
 readarray -d '' -t EXTRA_SCANNER_ARGS < "$EXTRA_ARGS_FILE"
 
 # --- scanner-mode: dotnet ----------------------------------------------------
@@ -151,13 +166,14 @@ scan_with_dotnet() {
   local version
   version="$(jq -r '.tools["dotnet-sonarscanner"].version // empty' "$manifest")"
   if [[ -z "$version" ]]; then
-    echo "Could not resolve the dotnet-sonarscanner version from ${manifest}." >&2
-    exit 1
+    fail scanner-install-failed "Could not resolve the dotnet-sonarscanner version from ${manifest}."
   fi
   DOTNET_TOOL_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/dotnet-sonarscanner.XXXXXX")"
   BUILD_LOG_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/dotnet-build-log.XXXXXX")"
   echo "Installing dotnet-sonarscanner ${version}..."
-  dotnet tool install dotnet-sonarscanner --version "$version" --tool-path "$DOTNET_TOOL_DIR"
+  if ! dotnet tool install dotnet-sonarscanner --version "$version" --tool-path "$DOTNET_TOOL_DIR"; then
+    fail scanner-install-failed "Could not install dotnet-sonarscanner ${version} (is the .NET SDK set up?)."
+  fi
   local scanner="${DOTNET_TOOL_DIR}/dotnet-sonarscanner"
 
   # Sonar's own C# rules only by default: a repo's own Roslyn analyzers
@@ -188,34 +204,45 @@ scan_with_dotnet() {
     "/d:sonar.projectBaseDir=${ABS_PROJECT_BASE_DIR}" \
     "${roslyn_args[@]}" \
     "${EXTRA_SCANNER_ARGS[@]}"); then
-    echo "dotnet-sonarscanner begin failed." >&2
-    exit 1
+    fail begin-failed "dotnet-sonarscanner begin failed."
   fi
 
   # BUILD_COMMAND comes from the caller's workflow via env, never
-  # interpolated into a script: bash -c parses it exactly once. The Sonar
-  # token is removed from the build's environment - build code (MSBuild
-  # targets, NuGet package scripts) is the code under scan.
+  # interpolated into a script: bash -c parses it exactly once.
+  # `env -u SONAR_TOKEN` is hygiene only, NOT a boundary: build code is
+  # the code under scan, and it can still read the token from this
+  # script's own environment (/proc/$PPID/environ) or from `end`'s command
+  # line - see the README's trust note.
   echo "Running build-command..."
   local build_status=0
   (cd "$ABS_PROJECT_BASE_DIR" && env -u SONAR_TOKEN bash -c "$BUILD_COMMAND") 2>&1 | tee "$BUILD_LOG_FILE" || build_status=$?
   if (( build_status != 0 )); then
-    echo "build-command exited with status ${build_status}; not running dotnet-sonarscanner end." >&2
-    exit 1
+    fail build-command-failed "build-command exited with status ${build_status}; not running dotnet-sonarscanner end."
   fi
 
   if ! (cd "$ABS_PROJECT_BASE_DIR" && "$scanner" end "/d:sonar.token=${SONAR_TOKEN}") 2>&1 | tee "$SCANNER_LOG_FILE"; then
-    echo "dotnet-sonarscanner end failed." >&2
-    exit 1
+    if grep -q "No analyzable projects were found" "$SCANNER_LOG_FILE"; then
+      fail no-analyzable-projects "dotnet-sonarscanner end failed: the build compiled no C# project it could analyze."
+    fi
+    fail end-failed "dotnet-sonarscanner end failed."
   fi
 
   # `end` exits 0 "ANALYSIS SUCCESSFUL" even when a project failed to
   # build (behind a build script that swallowed the failure) or was
   # skipped for a duplicate/invalid ProjectGuid - fail instead.
-  python3 "${SCRIPTS_DIR}/check_dotnet_projects.py" \
+  local reason_file
+  reason_file="$(mktemp "${RUNNER_TEMP:-/tmp}/dotnet-check-reason.XXXXXX")"
+  if ! python3 "${SCRIPTS_DIR}/check_dotnet_projects.py" \
     --sonarqube-out "${ABS_PROJECT_BASE_DIR}/.sonarqube/out" \
     --log "$BUILD_LOG_FILE" \
-    --log "$SCANNER_LOG_FILE"
+    --log "$SCANNER_LOG_FILE" \
+    --reason-out "$reason_file"; then
+    local reason
+    reason="$(cat "$reason_file")"
+    rm -f "$reason_file"
+    fail "${reason:-project-not-analyzed}" "Failing: not every project the build touched was analyzed (see above)."
+  fi
+  rm -f "$reason_file"
 }
 
 # --- scanner-mode: cli -------------------------------------------------------
@@ -282,32 +309,38 @@ fi
 # the scanner never even logs about them (from a file-extension scan of
 # PROJECT_BASE_DIR instead - see detect_unanalyzed_languages.py). In
 # dotnet mode the log is `end`'s, which never carries the CLI's "cannot be
-# analyzed" line - C#/VB.NET are what that scanner analyzes - so only the
-# extension scan (C, C++, Objective-C, Swift) can report anything. This
-# never fails the scan itself: it only produces a result that action.yml
-# surfaces (warning annotation, job summary, report banner, Check
-# Run/comment, and the fail-on-unanalyzed-languages input) after the
-# findings and report outputs further downstream are written.
-python3 "${SCRIPTS_DIR}/detect_unanalyzed_languages.py" \
-  --scanner-log "$SCANNER_LOG_FILE" \
-  --project-base-dir "$ABS_PROJECT_BASE_DIR" \
-  --config "$SAST_CONFIG_FILE" \
-  --ignore-file "$SAST_IGNORE_FILE" \
+# analyzed" line; instead, any .cs/.vb file under PROJECT_BASE_DIR that no
+# project's FilesToAnalyze lists (a solution build-command didn't build, a
+# project whose restore failed behind `|| true`, a stray file) is reported
+# as unanalyzed C#/VB.NET, alongside the extension scan (C, C++,
+# Objective-C, Swift). This never fails the scan itself: it only produces
+# a result that action.yml surfaces (warning annotation, job summary,
+# report banner, Check Run/comment, and the fail-on-unanalyzed-languages
+# input) after the findings and report outputs further downstream are
+# written.
+detect_args=(
+  --scanner-log "$SCANNER_LOG_FILE"
+  --project-base-dir "$ABS_PROJECT_BASE_DIR"
+  --config "$SAST_CONFIG_FILE"
+  --ignore-file "$SAST_IGNORE_FILE"
   --out "$UNANALYZED_LANGUAGES_FILE"
+)
+if [[ "$SCANNER_MODE" == "dotnet" ]]; then
+  detect_args+=(--dotnet-sonarqube-out "${ABS_PROJECT_BASE_DIR}/.sonarqube/out")
+fi
+python3 "${SCRIPTS_DIR}/detect_unanalyzed_languages.py" "${detect_args[@]}"
 UNANALYZED_LANGUAGES="$(cat "$UNANALYZED_LANGUAGES_FILE")"
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "unanalyzed-languages=${UNANALYZED_LANGUAGES}" >> "$GITHUB_OUTPUT"
 fi
 
 if [[ ! -f "$report_task_file" ]]; then
-  echo "Scanner did not produce ${report_task_file}." >&2
-  exit 1
+  fail no-report-task "Scanner did not produce ${report_task_file}."
 fi
 
 ce_task_id="$(sed -n 's/^ceTaskId=//p' "$report_task_file")"
 if [[ -z "$ce_task_id" ]]; then
-  echo "Could not find ceTaskId in ${report_task_file}." >&2
-  exit 1
+  fail no-report-task "Could not find ceTaskId in ${report_task_file}."
 fi
 
 echo "Waiting for compute engine task ${ce_task_id} to finish (timeout: ${SCAN_TIMEOUT_SECONDS}s)..."
@@ -322,17 +355,15 @@ while (( elapsed < SCAN_TIMEOUT_SECONDS )); do
       exit 0
       ;;
     FAILED|CANCELED)
-      echo "Compute engine task ended with status ${task_status}." >&2
       echo "$task_json" >&2
-      exit 1
+      fail ce-task-failed "Compute engine task ended with status ${task_status}."
       ;;
     PENDING|IN_PROGRESS|"")
       # keep polling
       ;;
     *)
-      echo "Unexpected compute engine task status '${task_status}'." >&2
       echo "$task_json" >&2
-      exit 1
+      fail ce-task-failed "Unexpected compute engine task status '${task_status}'."
       ;;
   esac
 
@@ -340,5 +371,4 @@ while (( elapsed < SCAN_TIMEOUT_SECONDS )); do
   elapsed=$(( elapsed + POLL_INTERVAL_SECONDS ))
 done
 
-echo "Timed out after ${SCAN_TIMEOUT_SECONDS}s waiting for compute engine task ${ce_task_id}." >&2
-exit 1
+fail ce-task-timeout "Timed out after ${SCAN_TIMEOUT_SECONDS}s waiting for compute engine task ${ce_task_id}."

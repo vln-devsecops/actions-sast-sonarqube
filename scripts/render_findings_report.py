@@ -41,9 +41,10 @@ def render_unanalyzed_languages_banner(unanalyzed_languages):
         return ""
     return (
         f"> **Not analyzed:** {', '.join(unanalyzed_languages)}. "
-        "sonar-scanner-cli cannot analyze these languages - these files "
-        "were NOT analyzed, so the absence of findings in this report says "
-        "nothing about them."
+        "This scan's scanner can't analyze these languages, or (scanner-mode: "
+        "dotnet) build-command didn't compile these files - they were NOT "
+        "analyzed, so the absence of findings in this report says nothing "
+        "about them."
     )
 
 

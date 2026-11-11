@@ -161,7 +161,7 @@ action to use it instead of the CLI. Inputs:
 | Input | Default | Meaning |
 |---|---|---|
 | `scanner-mode` | `cli` | `cli` (unchanged) or `dotnet`. |
-| `build-command` | `""` | Required with `dotnet`, rejected with `cli`. Builds the code, e.g. `dotnet build MySolution.sln`. Runs with `bash -c` from `project-base-dir`, between `begin` and `end`, without the Sonar token in its environment. |
+| `build-command` | `""` | Required with `dotnet`, rejected with `cli`. Builds the code, e.g. `dotnet build MySolution.sln`. Runs with `bash -c` from `project-base-dir`, between `begin` and `end`. `SONAR_TOKEN` is removed from its environment, but the build can still read the token (see the trust note). |
 | `dotnet-version` | `10.0.x` | Passed to `actions/setup-dotnet`, which runs only in `dotnet` mode. |
 | `import-roslyn-issues` | `"false"` | `"true"` also imports the project's own Roslyn analyzer issues (StyleCop, CA*, compiler warnings). By default only Sonar's own C# rules are reported (`sonar.cs.roslyn.ignoreIssues=true`). |
 
@@ -193,8 +193,18 @@ The scan fails, rather than reporting a clean result, when:
   a `ProjectInfo.xml`, and every project with files to analyze must appear
   in the `sonar.modules` that `end` passed to the scanner engine. A project
   that fails before compilation starts, such as a failed restore, leaves no
-  trace there. Only `build-command`'s exit status catches that case, so
-  don't mask build failures.
+  trace there. `build-command`'s exit status catches that case, so don't
+  mask build failures. If a build script does mask one, the project's
+  `.cs` files are still reported as unanalyzed C# (see below).
+  A project excluded on purpose with `<SonarQubeExclude>true</SonarQubeExclude>`
+  is not a failure.
+
+Every failure sets the action's `failure-reason` output to a fixed code
+(`build-command-failed`, `begin-failed`, `end-failed`,
+`no-analyzable-projects`, `project-not-built`, `project-not-analyzed`,
+`build-command-required`, `invalid-sast-config`, `no-report-task`, ...)
+and writes it to the job summary, so a caller can tell an intended block
+from a setup error.
 
 Scope and limits:
 
@@ -208,9 +218,20 @@ Scope and limits:
   are tests (a test SDK reference, or `<SonarQubeTestProject>`). The other
   `.sastrc`/`.sastignore` settings work as in `cli` mode, with paths
   relative to `project-base-dir`.
-- C# and VB.NET are not reported as unanalyzed in this mode, because this
-  scanner analyzes them. C, C++, Objective-C and Swift files are still
-  detected and reported as above.
+- `sonar.projectBaseDir` is set to `project-base-dir`, so `.sastrc` paths
+  mean the same in both modes. A project outside `project-base-dir` (for
+  example one that `build-command` reaches with `../`) is dropped from the
+  analysis. Point `project-base-dir` at a directory that contains every
+  project you build.
+- This scanner analyzes only what `build-command` compiles. Any `.cs` or
+  `.vb` file under `project-base-dir` that no built project compiled is
+  reported as unanalyzed C# or VB.NET. That covers a second solution the
+  command doesn't build, a project whose restore failed behind `|| true`,
+  and a stray file. The report goes through the same `unanalyzed-languages`
+  output and `fail-on-unanalyzed-languages` input as above, and only warns
+  by default. `bin/`, `obj/`, gitignored files and `.sastrc`/`.sastignore`
+  exclusions are skipped. C, C++, Objective-C and Swift files are reported
+  as in `cli` mode.
 - Coverage import (`sonar.cs.opencover.reportsPaths` and the like) is not
   supported, so `exclusions.coverage_paths` has no effect on C#.
 - `dotnet-sonarscanner` is pinned in `.config/dotnet-tools.json`, and
@@ -220,16 +241,21 @@ Scope and limits:
 - The Sonar token is passed as `/d:sonar.token=...` on the `begin` and
   `end` command lines, because the scanner ignores the `SONAR_TOKEN`
   environment variable. GitHub Actions masks it in the log, and the script
-  never echoes it. It is visible in the process list while `begin`/`end`
-  run. That is an accepted risk: the server is ephemeral, and the token
-  dies with the job.
+  never echoes it. The build can still read it, as the trust note below
+  explains. That is an accepted risk: the token is only valid for the
+  ephemeral SonarQube server, which dies with the job.
 
 **Trust note.** `cli` mode never runs the code it scans. `dotnet` mode
 does: `build-command`, MSBuild targets and NuGet package build scripts all
 run on the runner, beside everything the job holds. Build code can rewrite
 `.sonarqube/` (including the config `end` reads, so it can redirect `end`
 to another server or binary) and, in the same job, the findings files a
-policy step later reads. So `dotnet` mode can't defend the gate against an
+policy step later reads. Build code can also read the Sonar token. The
+action removes `SONAR_TOKEN` from `build-command`'s environment, but that
+is hygiene, not a boundary: the token is still in the parent process's
+environment (`/proc/$PPID/environ`) and on `end`'s command line. With it,
+build code can, for example, mark its own issues resolved on the
+ephemeral server. So `dotnet` mode can't defend the gate against an
 untrusted author within one job:
 
 - Run it automatically only for PRs from branches in the same repository

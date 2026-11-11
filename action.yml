@@ -52,10 +52,12 @@ inputs:
     default: "false"
   fail-on-unanalyzed-languages:
     description: >-
-      Set "true" to fail this action when project-base-dir contains files in
-      a language the plain sonar-scanner-cli can't analyze (C#, VB.NET - not
-      covered without the Scanner for .NET; C, C++, Objective-C, Swift - no
-      Community Build plugin at all; see scripts/detect_unanalyzed_languages.py
+      Set "true" to fail this action when project-base-dir contains files
+      this scan did not analyze: with scanner-mode "cli", C# and VB.NET (not
+      covered without the Scanner for .NET); with scanner-mode "dotnet", C#
+      and VB.NET files build-command did not compile; in both modes C, C++,
+      Objective-C, Swift (no Community Build plugin at all; see
+      scripts/detect_unanalyzed_languages.py
       and the unanalyzed-languages output below). The findings-json and
       findings-report outputs are still produced first, so callers that read
       them with `if: always()` still get a result. Default "false": warn
@@ -87,8 +89,10 @@ inputs:
       Required with scanner-mode "dotnet", rejected otherwise. A shell
       command that builds the code to analyze, e.g. "dotnet build
       MySolution.sln". Run with `bash -c` from project-base-dir, between
-      the scanner's `begin` and `end` steps, without the Sonar token in its
-      environment. One begin/end per invocation: for several solutions,
+      the scanner's `begin` and `end` steps. SONAR_TOKEN is removed from its
+      environment as hygiene only - build code can still read the token
+      (e.g. from the parent process's environment); see the README's trust
+      note. One begin/end per invocation: for several solutions,
       pass a command (or script) that builds them all. A non-zero exit
       fails the action.
     required: false
@@ -131,6 +135,16 @@ outputs:
       findings above say nothing about these files: they were not analyzed,
       not analyzed-and-clean.
     value: ${{ steps.scan.outputs.unanalyzed-languages }}
+  failure-reason:
+    description: >-
+      Empty on success. When the scan step fails, a fixed reason code naming
+      why, e.g. build-command-failed, begin-failed, end-failed,
+      no-analyzable-projects, project-not-built, project-not-analyzed,
+      build-command-required, invalid-sast-config, no-report-task,
+      ce-task-failed (see scripts/run_scan.sh's `fail` calls). Also written
+      to the job summary. Lets a caller tell an intended block from a setup
+      error.
+    value: ${{ steps.scan.outputs.failure-reason }}
 
 runs:
   using: composite
@@ -221,7 +235,7 @@ runs:
       run: |
         set -euo pipefail
         if [[ -n "$UNANALYZED_LANGUAGES" ]]; then
-          message="This scan did NOT analyze: ${UNANALYZED_LANGUAGES} - sonar-scanner-cli cannot analyze these languages, so the absence of findings above says nothing about these files."
+          message="This scan did NOT analyze: ${UNANALYZED_LANGUAGES} - this scan's scanner can't analyze these languages, or (scanner-mode: dotnet) build-command didn't compile these files, so the absence of findings above says nothing about these files."
           echo "::warning::${message}"
           {
             echo "### SonarQube Community: languages not analyzed"

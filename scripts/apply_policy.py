@@ -91,9 +91,10 @@ def build_summary(findings, blocking_findings, threshold, blocking_enabled, unan
     # afterthought to an otherwise-clean Check Run.
     if unanalyzed_languages:
         lines += [
-            f"**Not analyzed:** {', '.join(unanalyzed_languages)}. sonar-scanner-cli cannot "
-            "analyze these languages - these files were NOT analyzed, so the finding counts "
-            "below say nothing about them.",
+            f"**Not analyzed:** {', '.join(unanalyzed_languages)}. This scan's scanner can't "
+            "analyze these languages, or (scanner-mode: dotnet) build-command didn't compile "
+            "these files - they were NOT analyzed, so the finding counts below say nothing "
+            "about them.",
             "",
         ]
     lines += [

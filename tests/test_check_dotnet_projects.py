@@ -173,6 +173,13 @@ def test_find_skipped_log_lines_only_matches_project_guid_skips():
     assert find_skipped_log_lines("WARNING: Some other reason. The project will not be analyzed.\n") == []
 
 
+def test_find_skipped_log_lines_strips_an_msbuild_node_prefix():
+    log = "1>Sonar: The project does not have a valid ProjectGuid. Analysis results for this project will not be uploaded.\n"
+    assert find_skipped_log_lines(log) == [
+        "Sonar: The project does not have a valid ProjectGuid. Analysis results for this project will not be uploaded."
+    ]
+
+
 def test_find_skipped_log_lines_strips_a_bare_timestamp():
     # A skip line with neither a WARNING: nor a Sonar: prefix still loses
     # its leading timestamp.

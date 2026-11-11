@@ -237,6 +237,14 @@ there would trip unanalyzed-language detection on every run.
 | `partial-build/` | `dotnet build PartialBuild.slnx \|\| true` | fails even though `end` logs `ANALYSIS SUCCESSFUL`: `out/<n>: a project started building but did not finish building (no ProjectInfo.xml) - first compiler error: CS1002 in .../Broken/Broken.cs` |
 | `no-csharp/` | `dotnet build Empty/Empty.csproj` | fails: `No analyzable projects were found.`, then `dotnet-sonarscanner end failed.` |
 | `duplicate-guid/` | `dotnet build DuplicateGuid.slnx` | fails: `First (...)`/`Second (...)`: `not analyzed by \`end\` (ProjectGuid ... missing from sonar.modules ...)`, plus the scanner's own `Duplicate ProjectGuid ... will not be analyzed` lines |
+| `excluded-project/` | `dotnet build ExcludedProject.slnx` | success: `<SonarQubeExclude>` on `Excluded/` is deliberate. `end` logs `The exclude flag has been set so the project will not be analyzed`, but the scan passes, with findings from `Normal/` only and empty `unanalyzed-languages` |
+| `stray-csharp/` | `dotnet build App/App.csproj` | success, but `unanalyzed-languages=C#`: `Unbuilt/` was never compiled (it fails only with `fail-on-unanalyzed-languages: true`) |
+
+Each failing case also writes a `failure-reason=<code>` line to
+`$GITHUB_OUTPUT` (set `GITHUB_OUTPUT` to a scratch file to see it):
+`build-command-failed`, `project-not-built`, `no-analyzable-projects` and
+`project-not-analyzed` respectively. `ci.yml` asserts those codes, not just
+that the step failed.
 
 Prerequisites: a .NET SDK that can build `net10.0` on `PATH`, plus
 section 2's ephemeral stack and token. A user-local SDK is enough, for
