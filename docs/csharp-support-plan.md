@@ -1,6 +1,6 @@
 # C# support plan (living document)
 
-**Status:** Phase 0 done; Phase 1 docs pushed, code in review fixes; Phases 2-4 unblocked · **Last updated:** 2026-11-10 · **Owner:** rlc
+**Status:** Phase 0 done; Phase 1 PRs open, awaiting review; Phases 2-4 unblocked · **Last updated:** 2026-11-10 · **Owner:** rlc
 
 Update the status table and the change log below as work lands. Do not rewrite history; append.
 
@@ -27,7 +27,7 @@ The same silent false-negative applies to every language the Community Build can
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Spike: prove approach against a real C# fixture | done; decisions approved 2026-11-11 |
-| 1 | Stop the bleeding: fix docs, warn on unanalyzed languages | in progress (docs) |
+| 1 | Stop the bleeding: fix docs, warn on unanalyzed languages | PRs open: guidance#35, devsecops.vlinder.ca#136, #52 |
 | 2 | Tests first: C# fixture + specs (BDD/TDD) | not started |
 | 3 | Implement `dotnet` scan mode in `run_scan.sh` + `action.yml` | not started |
 | 4 | Workflows (`sonar-pr.yml`, `sonar-baseline.yml`) + normalization | not started |
@@ -220,3 +220,5 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - 2026-11-10 - Phase 0 spike complete; findings recorded under Phase 0 and proposed decisions under Decisions. Contradicts earlier assumptions: JRE provisioned at begin (not end) and `SONAR_USER_HOME` env insufficient; SARIF hashes exist when paths resolve; `end` exits 0 on partial builds and skipped projects; build code can redirect `end` via `.sonarqube/conf`.
 - 2026-11-11 - rlc decided the `dotnet`-mode trust model (fork PRs via maintainer `workflow_dispatch` only) and Sonar-rules-only import; approved pushing the Phase 1 docs branches, pushed to `guidance` and `devsecops.vlinder.ca` (no PRs yet).
 - 2026-11-11 - rlc approved the Phase 0 decisions (scanner pin, on-runner, token on command line, JRE under RUNNER_TEMP, fail on partial builds, no SARIF). Phases 2-4 unblocked. Phase 1 code implementer stopped mid-fix on a usage limit; to be resumed.
+- 2026-11-11 - Confirmed in GitHub Actions (run 43020361585, throwaway branch since deleted): a composite action whose last step fails still sets its outputs from earlier steps, and the job ends failed - the Phase 1 `sonar-pr.yml` design relies on this.
+- 2026-11-11 - Phase 1 PRs opened: plan #51, guidance#35, devsecops.vlinder.ca#136, and #52 (detection + `fail-on-unanalyzed-languages`, after two independent review rounds that fixed: Check Run staying green when failing, steps running after cancel, log-line injection, false positives from `.baseline-checkout`/`node_modules`, non-UTF-8 filenames, submodules).
