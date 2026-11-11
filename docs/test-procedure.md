@@ -24,6 +24,12 @@ pytest tests/ -v --cov=scripts --cov-report=term-missing
 shellcheck scripts/*.sh
 ```
 
+`tests/test_run_scan.py` runs the real `run_scan.sh` with fake `docker`,
+`curl` and `dotnet` binaries written into pytest's temp directory. On a host
+whose `/tmp` is mounted `noexec`, point `TMPDIR` (or `--basetemp`) at a
+directory you can execute from. Otherwise the fixture fails, on purpose,
+instead of silently running the real `docker`.
+
 Expect all tests to pass and every file in the coverage table at 100% -
 network/CLI-glue functions are marked `# pragma: no cover` deliberately (see
 each script), so the gate is meaningful rather than padded. Reproduce the
@@ -214,6 +220,68 @@ to a copy of `fixtures/.sastrc` (e.g. `sonar.token: x`) and rerun
 `scripts/run_scan.sh` - expect it to exit non-zero with `Invalid SAST
 config: ...` before the scanner ever runs, rather than silently ignoring
 the mistake.
+
+## 8a. `scanner-mode: dotnet` (C#)
+
+Automated in `ci.yml`'s `dotnet-e2e` job on every push and PR. This
+section is for running the same thing by hand, for example after changing
+`run_scan.sh`, `check_dotnet_projects.py` or the pinned
+`dotnet-sonarscanner` version. The fixtures live in `fixtures-dotnet/`, not
+`fixtures/`, because the cli-mode jobs scan `fixtures/`, and a C# file
+there would trip unanalyzed-language detection on every run.
+
+| Fixture | `build-command` | Expected |
+|---|---|---|
+| `tiny/` | `dotnet build Tiny.slnx` | success; findings include `csharpsquid:S1144` and `csharpsquid:S1313` (plus `S2325`), and none starting with `external_` |
+| `broken-build/` | `dotnet build Broken/Broken.csproj` | fails: `build-command exited with status 1; not running dotnet-sonarscanner end.` |
+| `partial-build/` | `dotnet build PartialBuild.slnx \|\| true` | fails even though `end` logs `ANALYSIS SUCCESSFUL`: `out/<n>: a project started building but did not finish building (no ProjectInfo.xml) - first compiler error: CS1002 in .../Broken/Broken.cs` |
+| `no-csharp/` | `dotnet build Empty/Empty.csproj` | fails: `No analyzable projects were found.`, then `dotnet-sonarscanner end failed.` |
+| `duplicate-guid/` | `dotnet build DuplicateGuid.slnx` | fails: `First (...)`/`Second (...)`: `not analyzed by \`end\` (ProjectGuid ... missing from sonar.modules ...)`, plus the scanner's own `Duplicate ProjectGuid ... will not be analyzed` lines |
+
+Prerequisites: a .NET SDK that can build `net10.0` on `PATH`, plus
+section 2's ephemeral stack and token. A user-local SDK is enough, for
+example `dotnet-install.sh --channel 10.0 --install-dir ~/.dotnet-sdk`;
+no system install is needed. On a host whose `/tmp` is `noexec`, set
+`RUNNER_TEMP` to a directory you can execute from. The scanner, its JRE
+and the run's scratch files all go there.
+
+Copy each fixture to a scratch directory first, so the build's `bin/`,
+`obj/` and `.sonarqube/` don't land in your checkout:
+
+```sh
+cp -r fixtures-dotnet/tiny ~/scratch/tiny
+SONAR_HOST_URL=http://localhost:9000 SONAR_TOKEN="$token" \
+  PROJECT_KEY=dotnet-tiny PROJECT_BASE_DIR=~/scratch/tiny \
+  COMPOSE_FILE=docker-compose.ephemeral.yml \
+  SAST_CONFIG_FILE=~/scratch/tiny/.sastrc SAST_IGNORE_FILE=~/scratch/tiny/.sastignore \
+  RUNNER_TEMP=~/scratch/runner-temp \
+  SCANNER_MODE=dotnet BUILD_COMMAND="dotnet build Tiny.slnx" \
+  ./scripts/run_scan.sh
+python3 scripts/fetch_findings.py --host http://localhost:9000 --token "$token" \
+  --project-key dotnet-tiny --out ~/scratch/dotnet-tiny.json
+jq -r '.[].rule' ~/scratch/dotnet-tiny.json
+```
+
+Then repeat it for each bad case in the table, and confirm each one exits
+non-zero with the message shown. A bad case that exits 0 means the control
+does not block. Also check:
+
+- **`tests.paths` fails closed.** Put `tests: {paths: ["Tiny.Core.Tests/**"]}`
+  in the scratch copy's `.sastrc`. Expect `Invalid SAST config: .sastrc:
+  tests.paths is not supported with scanner-mode: dotnet ...`, before
+  `begin` runs.
+- **`.sastrc` carries over.** An `ignore` entry for `csharpsquid:S1313` on
+  `Tiny.Core/**` should remove that finding. `exclusions.paths:
+  ["Tiny.Core/Greeter.cs"]` should leave zero findings. Paths are relative
+  to `project-base-dir`, the same as in `cli` mode.
+- **The token never reaches the log.** `grep -cF "$token"` on the captured
+  output prints `0`.
+- **The JRE lives under `RUNNER_TEMP`.** `end`'s `Using Java found in
+  Analysis Config: ...` line names a path under
+  `$RUNNER_TEMP/sonar-scanner-cache.*`.
+
+Always run `docker compose -f docker-compose.ephemeral.yml down -v`
+afterwards, even if a run failed.
 
 ## 9. Deleting a baseline artifact
 

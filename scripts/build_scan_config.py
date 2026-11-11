@@ -49,6 +49,11 @@ that shared root are tests:
                             entry with no glob character is expanded to
                             "<dir>/**" so it still selects everything
                             under it>
+
+With `--scanner-mode dotnet` (run_scan.sh's `scanner-mode: dotnet`), the
+same properties are written as `/d:key=value` tokens for
+`dotnet-sonarscanner begin` instead, and `tests.paths` is rejected rather
+than translated - see build_dotnet_scan_properties().
 """
 import argparse
 import os
@@ -245,15 +250,79 @@ def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
     return props
 
 
+def build_dotnet_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
+    """Same translation as build_scan_properties(), for `scanner-mode:
+    dotnet` (SonarScanner for .NET `begin`), with two differences found
+    in the Phase 0 spike (docs/csharp-support-plan.md):
+
+    - `.sastrc` `tests.paths` is rejected (ValueError naming the field)
+      rather than translated: the .NET scanner ignores sonar.sources and
+      sonar.tests (test projects are decided by MSBuild), so the
+      translation above would silently do nothing - and a config error
+      must not look like noise reduction applied.
+    - DOTNET_FORBIDDEN_KEYS are never emitted, checked here as defense in
+      depth rather than trusted to the shared translation: sonar.sources
+      and sonar.tests are ignored by `begin`, and sonar.working.directory
+      makes it exit 1.
+
+    Everything else (exclusions, cpd/coverage exclusions,
+    sonar.issue.ignore.multicriteria.*, sonar.scm.disabled) carries over
+    unchanged; the spike verified each is honoured via `/d:`."""
+    sastrc = parse_sastrc(sastrc_text or "")
+    if sastrc["tests"]:
+        raise ValueError(
+            ".sastrc: tests.paths is not supported with scanner-mode: dotnet - the SonarScanner "
+            "for .NET ignores sonar.sources/sonar.tests and decides which projects are tests "
+            "from MSBuild (e.g. a test SDK reference or <SonarQubeTestProject>true</SonarQubeTestProject>); "
+            "remove tests.paths from .sastrc"
+        )
+    props = build_scan_properties(sastrc_text, sastignore_text, scm_disabled=scm_disabled)
+    for prop in props:
+        key = prop.split("=", 1)[0]
+        if key in DOTNET_FORBIDDEN_KEYS:
+            raise ValueError(f"{key} must never be passed to the SonarScanner for .NET")
+    return props
+
+
+# Properties `dotnet-sonarscanner begin` must never receive - see
+# build_dotnet_scan_properties().
+DOTNET_FORBIDDEN_KEYS = frozenset({"sonar.sources", "sonar.tests", "sonar.working.directory"})
+
+SCANNER_ARG_PREFIXES = {
+    "cli": "-D",  # sonar-scanner-cli: -Dkey=value
+    "dotnet": "/d:",  # dotnet-sonarscanner begin: /d:key=value
+}
+
+
+def format_scanner_args(props, scanner_mode):
+    """Turn `key=value` properties into the command-line tokens the given
+    scanner mode's scanner takes."""
+    try:
+        prefix = SCANNER_ARG_PREFIXES[scanner_mode]
+    except KeyError:
+        raise ValueError(f"unknown scanner mode {scanner_mode!r} (expected one of: {', '.join(SCANNER_ARG_PREFIXES)})")
+    return [f"{prefix}{prop}" for prop in props]
+
+
 def main():  # pragma: no cover - CLI glue, validated live
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Path to an optional .sastrc file (need not exist)")
     parser.add_argument("--ignore-file", required=True, help="Path to an optional .sastignore file (need not exist)")
-    parser.add_argument("--out", required=True, help="Path to write NUL-delimited -Dkey=value tokens to")
+    parser.add_argument(
+        "--out",
+        required=True,
+        help="Path to write NUL-delimited -Dkey=value (cli) or /d:key=value (dotnet) tokens to",
+    )
     parser.add_argument(
         "--scm-disabled",
         action="store_true",
         help="Add sonar.scm.disabled=true, for a shallow checkout with no blame data available",
+    )
+    parser.add_argument(
+        "--scanner-mode",
+        choices=sorted(SCANNER_ARG_PREFIXES),
+        default="cli",
+        help="Which scanner the tokens are for (default: cli, sonar-scanner-cli)",
     )
     args = parser.parse_args()
 
@@ -267,14 +336,15 @@ def main():  # pragma: no cover - CLI glue, validated live
         with open(args.ignore_file) as f:
             sastignore_text = f.read()
 
+    build = build_dotnet_scan_properties if args.scanner_mode == "dotnet" else build_scan_properties
     try:
-        props = build_scan_properties(sastrc_text, sastignore_text, scm_disabled=args.scm_disabled)
+        props = build(sastrc_text, sastignore_text, scm_disabled=args.scm_disabled)
     except ValueError as e:
         raise SystemExit(f"Invalid SAST config: {e}")
 
     with open(args.out, "wb") as f:
-        for prop in props:
-            f.write(f"-D{prop}".encode())
+        for token in format_scanner_args(props, args.scanner_mode):
+            f.write(token.encode())
             f.write(b"\0")
 
     if sastrc_text is not None:

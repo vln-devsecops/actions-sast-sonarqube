@@ -66,6 +66,49 @@ inputs:
       these languages.
     required: false
     default: "false"
+  scanner-mode:
+    description: >-
+      Which scanner to run. "cli" (the default, unchanged): sonar-scanner-cli
+      in Docker - no build, but it cannot analyze C#/VB.NET. "dotnet": the
+      SonarScanner for .NET on the runner (`begin`, build-command, `end`,
+      all from project-base-dir) - the only way C# is actually analyzed.
+      dotnet mode is Linux runners and SDK-style projects only, and RUNS
+      build-command - the code under scan - on the runner; see the README's
+      trust note before using it on pull requests from forks. It fails if
+      build-command, `begin` or `end` fail, or if any project the build
+      touched was not analyzed (a partially failed build, a duplicate or
+      invalid ProjectGuid). .sastrc `tests.paths` is rejected in this mode
+      (MSBuild decides which projects are tests), and coverage import is
+      not supported.
+    required: false
+    default: cli
+  build-command:
+    description: >-
+      Required with scanner-mode "dotnet", rejected otherwise. A shell
+      command that builds the code to analyze, e.g. "dotnet build
+      MySolution.sln". Run with `bash -c` from project-base-dir, between
+      the scanner's `begin` and `end` steps, without the Sonar token in its
+      environment. One begin/end per invocation: for several solutions,
+      pass a command (or script) that builds them all. A non-zero exit
+      fails the action.
+    required: false
+    default: ""
+  dotnet-version:
+    description: >-
+      .NET SDK version(s) for actions/setup-dotnet, which runs only with
+      scanner-mode "dotnet". Must be able to build the project.
+    required: false
+    default: "10.0.x"
+  import-roslyn-issues:
+    description: >-
+      scanner-mode "dotnet" only. Set "true" to also import issues from the
+      project's own Roslyn analyzers (StyleCop, CA*, compiler warnings) as
+      external issues. Default "false": only Sonar's own C# rules
+      (sonar.cs.roslyn.ignoreIssues=true) - a repo's own analyzers are
+      already enforced by its build, and imported they can drown the
+      findings.
+    required: false
+    default: "false"
 
 outputs:
   findings-json:
@@ -101,6 +144,14 @@ runs:
       shell: bash
       run: pip install -r "${{ github.action_path }}/requirements.txt"
 
+    - name: Set up .NET SDK
+      # Explicit comparison, never a bare truthy `if: ${{ inputs.x }}`: any
+      # non-empty string (including "false") is truthy there.
+      if: inputs.scanner-mode == 'dotnet'
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
+
     - name: Run SonarQube scan
       id: scan
       shell: bash
@@ -114,6 +165,11 @@ runs:
         SAST_CONFIG_FILE: ${{ inputs.project-base-dir }}/${{ inputs.sast-config-path }}
         SAST_IGNORE_FILE: ${{ inputs.project-base-dir }}/${{ inputs.sast-ignore-path }}
         SCM_DISABLED: ${{ inputs.scm-disabled }}
+        SCANNER_MODE: ${{ inputs.scanner-mode }}
+        # Passed via env only - never interpolate build-command into `run:`
+        # (script injection); run_scan.sh hands it to `bash -c` as-is.
+        BUILD_COMMAND: ${{ inputs.build-command }}
+        IMPORT_ROSLYN_ISSUES: ${{ inputs.import-roslyn-issues }}
       run: "${{ github.action_path }}/scripts/run_scan.sh"
 
     - name: Fetch and normalize findings
