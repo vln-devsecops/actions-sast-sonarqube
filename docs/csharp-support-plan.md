@@ -1,6 +1,6 @@
 # C# support plan (living document)
 
-**Status:** Phase 0 not started · **Last updated:** 2026-11-10 · **Owner:** rlc
+**Status:** Phase 0 done; Phase 1 docs pushed, code in review fixes; Phases 2-4 unblocked · **Last updated:** 2026-11-10 · **Owner:** rlc
 
 Update the status table and the change log below as work lands. Do not rewrite history; append.
 
@@ -16,7 +16,7 @@ The same silent false-negative applies to every language the Community Build can
 
 - Goal: a C# repo scanned through this action produces real SonarC# findings, normalized into the same findings JSON, diffed/blocked by the existing PR/baseline workflows.
 - Goal: until then, never report a clean scan for a C# repo that wasn't analyzed - not in the job log, the job summary, the Check Run, or the PR comment.
-- Goal: the blocking gate stays trustworthy in `dotnet` mode even though that mode executes the code under scan (see Phase 3 "Trust boundary").
+- Goal: the blocking gate stays trustworthy in `dotnet` mode for trusted authors; fork PRs run it only via a maintainer-triggered `workflow_dispatch` (see Decisions and Phase 3 "Trust boundary").
 - Non-goal: VB.NET, F#, C/C++ (not Community Build). Revisit VB.NET after C# lands.
 - Non-goal: auto-detecting how to build arbitrary repos. The caller supplies the build command.
 - Non-goal: Windows runners and projects that only build with Windows MSBuild (.NET Framework, non-SDK-style). The ephemeral SonarQube stack needs Linux + Docker (`docker compose`, `sysctl vm.max_map_count`), so `dotnet` mode is Linux runners and SDK-style projects only.
@@ -26,8 +26,8 @@ The same silent false-negative applies to every language the Community Build can
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | Spike: prove approach against a real C# fixture | not started |
-| 1 | Stop the bleeding: fix docs, warn on unanalyzed languages | not started |
+| 0 | Spike: prove approach against a real C# fixture | done; decisions approved 2026-11-11 |
+| 1 | Stop the bleeding: fix docs, warn on unanalyzed languages | in progress (docs) |
 | 2 | Tests first: C# fixture + specs (BDD/TDD) | not started |
 | 3 | Implement `dotnet` scan mode in `run_scan.sh` + `action.yml` | not started |
 | 4 | Workflows (`sonar-pr.yml`, `sonar-baseline.yml`) + normalization | not started |
@@ -76,7 +76,7 @@ Agents run the phases; rlc approves. No agent merges, publishes, or contacts the
 | Phase 1, 2, 4, 5 implementers | Sonnet | Well-specified checklists with existing patterns to follow; caught by an Opus reviewer. |
 
 **Prerequisites before starting**
-- The orchestrating session runs on the hardened self-hosted runner (`noexec` `/tmp`), which has Docker and a .NET SDK - so Phase 0, the end-to-end tests, and the JRE/`SONAR_USER_HOME` check run there directly.
+- The orchestrating session runs on the hardened self-hosted runner (`noexec` `/tmp`), which has Docker - so Phase 0, the end-to-end tests, and the JRE/`SONAR_USER_HOME` check run there directly. It has no .NET SDK or Java on the host (checked 2026-11-10); the spike uses the official .NET SDK container instead of installing on the host.
 - Local clones of `vln-devsecops/actions-sast-sonarqube`, `vln-devsecops/guidance`, `vln-devsecops/devsecops.vlinder.ca`, and `vln-polaris/fhcs-simulator` are available on the runner.
 - GitHub access (push branches, open PRs) for each repo that gets a PR: `actions-sast-sonarqube`, `guidance`, and `devsecops.vlinder.ca`. Add any missing repo to the session before the phase that needs it. `fhcs-simulator` (and the adopter's repo) are read-only for Phase 0; Phase 5's live validation runs the workflow there, which needs a PR adding it - get rlc's approval and access first.
 
@@ -98,6 +98,21 @@ Do this by hand against a small public .NET repo and `fhcs-simulator` (`repos/vl
 - [ ] Verify exact flag/property/tool names from Sonar's current docs, not memory.
 
 Exit: a decision recorded in "Decisions" below.
+
+### Phase 0 findings (2026-11-10)
+
+Evidence in `/home/rlc/csharp-spike/logs/` (runner-local). SDK image `mcr.microsoft.com/dotnet/sdk:10.0` (10.0.404), `dotnet-sonarscanner` 12.1.0, server 26.8.0.126808.
+
+- Plain CLI: `.cs` files indexed, 0 issues. 26.8 still logs, in the scanner log only (CE task warnings are empty): `WARN  Your project contains C# files which cannot be analyzed with the scanner you are using. To analyze C# or VB.NET, you must use the SonarScanner for .NET 5.x or higher, see https://redirect.sonarsource.com/doc/install-configure-scanner-msbuild.html`
+- begin/build/end works: tiny solution 5 issues (`csharpsquid:S1144`, `S1313`, `S2325`, `external_roslyn:CS0169`, `CA1822`); fhcs-simulator 159 issues, 128 of them external Roslyn/StyleCop (`SA1200`=103). Community Build needs scanner 5.14+.
+- `report-task.txt`: `<begin dir>/.sonarqube/out/.sonar/report-task.txt`, same `ceTaskId=` format.
+- Properties via `/d:`: `sonar.exclusions`, `sonar.cpd.exclusions`, `sonar.issue.ignore.multicriteria.*`, `sonar.scm.disabled`, `sonar.test.inclusions` work. `sonar.sources`/`sonar.tests` are ignored with a warning (exit 0). `sonar.working.directory` makes begin exit 1.
+- Token: `SONAR_TOKEN` env is not honoured; token must be in both steps or neither. A `/s:` settings file on begin keeps it off argv; `end` re-reads it, so the file must exist until `end`.
+- JRE is provisioned at **begin**, cached under `$HOME/.sonar/cache`; `SONAR_USER_HOME` env does not move it, `/d:sonar.userHome=` does. Cache on the `noexec` `/tmp`: `end` fails (Permission denied).
+- Bad cases: whole build fails / no build / zero C# compiled -> `end` exits 1. **Partial build failure -> `end` exits 0, "ANALYSIS SUCCESSFUL", silently missing the broken project.** **Duplicate/invalid `ProjectGuid` in the `.sln` (fhcs-simulator) -> 2 projects skipped with a WARNING, `end` exits 0.**
+- Trust boundary: build-time code can rewrite `.sonarqube/conf/SonarQubeAnalysisConfig.xml` (host URL, `JavaExePath`), redirecting `end` and its token or hijacking what `end` executes; the `/s:` token file is readable by the build too. Scoping the token to begin/end does not protect the gate.
+- SARIF route: hashes present when paths resolve, but wrong rule keys (`external_Microsoft (R) Visual C# Compiler:S1313`), every issue typed VULNERABILITY, no quality profile. Rejected.
+- Timings: fhcs-simulator 43s scanned vs 15s plain build (+~28s). Not covered: private NuGet feeds (fhcs uses none).
 
 ## Phase 1 - Stop the bleeding (ship independently)
 
@@ -164,6 +179,19 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - 2026-11-10 - Unanalyzed languages warn by default in v1 (opt-in fail via `fail-on-unanalyzed-languages`); default flips to fail in v2 - failing now would break `@v1` adopters with incidental `.cs` files, and the warning is surfaced in the Check Run/PR comment so a clean result is never shown silently.
 - 2026-11-10 - One `begin`/`end` per action invocation; multi-solution repos pass a `build-command` that builds a `.sln`/`.slnx` or a script building several - no per-solution loop in the action.
 - 2026-11-10 - `dotnet` mode is Linux runners and SDK-style projects only - the ephemeral SonarQube stack needs Linux + Docker.
+- 2026-11-10 - Site corrections leave `doc/design_handoff_devsecops_runbooks_site/` (the `.dc.html` mock and `source-docs/` copies) untouched - the site repo treats the handoff as a frozen spec (`doc/build-plan.md`, `ci_lint_markdown.yml`) and no earlier runbook edit changed it; this supersedes the Phase 1 item asking to update those copies.
+
+- 2026-11-11 - `dotnet` mode trust model (rlc): PRs from branches in the same repo are trusted; PRs from forks run `dotnet` mode only through a maintainer-triggered `workflow_dispatch`, never automatically. Applies to the proposed `dotnet`-mode PR workflow only; `cli` mode is unchanged - build code can rewrite `.sonarqube/conf` and redirect `end`, so the gate can't defend against an untrusted author in one job.
+- 2026-11-11 - Import only Sonar's own C# rules by default: `/d:sonar.cs.roslyn.ignoreIssues=true`, with an input to opt back in (rlc) - the repo's own StyleCop/CA analyzers were 128 of fhcs-simulator's 159 issues and are already enforced by its build.
+
+- 2026-11-11 - Pin `dotnet-sonarscanner` 12.1.0 in `.config/dotnet-tools.json`, bumped by Dependabot via a `nuget` entry (rlc) - verified live against 26.8; Community Build needs 5.14+.
+- 2026-11-11 - Run begin/build/end on the runner via `actions/setup-dotnet` (`dotnet-version` input) (rlc) - the scanner must share the build's process tree and directory.
+- 2026-11-11 - Read `ceTaskId` from `.sonarqube/out/.sonar/report-task.txt` - verified in the spike, same line format as the CLI.
+- 2026-11-11 - Pass the token on the command line, `/d:sonar.token` on both begin and end (rlc) - the server is ephemeral and the token is already masked in logs; `SONAR_TOKEN` env is not honoured. Supersedes the plan's "never on the command line".
+- 2026-11-11 - Cache the scanner's JRE under `RUNNER_TEMP` via `/d:sonar.userHome` (rlc) - `SONAR_USER_HOME` env doesn't move it, and a `noexec` cache breaks `end`.
+- 2026-11-11 - Fail the action on a non-zero `build-command` exit and on any project `end` skipped (`will not be analyzed`, invalid `ProjectGuid`, fewer analyzed projects than expected) (rlc) - `end` exits 0 on partial builds; fhcs-simulator will fail until its `.sln` GUIDs are fixed.
+- 2026-11-11 - Phase 1 detects unanalyzed C#/VB.NET from the CLI's `Your project contains ... files which cannot be analyzed` log line - still logged by 26.8, not exposed via CE warnings.
+- 2026-11-11 - Reject the SARIF import route (rlc) - wrong rule keys, every issue typed VULNERABILITY, no quality profile.
 
 ## Open questions
 
@@ -187,3 +215,8 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - 2026-11-10 - Review pass: added the `dotnet`-mode trust boundary (build runs PR code beside the gate's inputs); `.sastrc` `tests.paths` fails closed under the .NET scanner (no `sonar.sources`/`sonar.tests`); `report-task.txt` location, token, JRE/`SONAR_USER_HOME` spikes; moved the C# fixture out of `fixtures/`; widened Phase 1 detection to all unanalyzed languages and to the Check Run/PR comment; fallback-baseline double build, job timeout, private NuGet feeds; Linux/SDK-style scope; coverage import as non-goal; Dependabot `nuget` pin; recorded warn-now/fail-in-v2, one begin/end per invocation, and Linux-only decisions.
 - 2026-11-10 - Added "Roles and orchestration": orchestrator, per-phase implementers, independent per-PR reviewers, rlc's approval gates, sequencing, and access/environment prerequisites.
 - 2026-11-10 - Added per-role model choices (Opus for orchestrator, reviewers, Phase 0 and Phase 3; Sonnet for Phases 1, 2, 4, 5); prerequisites updated: the orchestrating session runs on the hardened self-hosted runner with Docker and a .NET SDK.
+- 2026-11-10 - Execution started. Runner check: Docker, `vm.max_map_count` and `noexec` `/tmp` present; .NET SDK and Java are NOT installed on the host, so Phase 0 uses the official .NET SDK container. Phase 0 spike and Phase 1 docs corrections started in parallel; docs changes held as local commits pending rlc's approval to push to `guidance` and the site.
+- 2026-11-10 - Phase 1 docs: local commits prepared in `guidance` and the site; independent review found no blockers; fixes requested (drop handoff edits, two site wording errors that still implied C# eligibility, softer "planned to warn" wording, `Mon YYYY` dates).
+- 2026-11-10 - Phase 0 spike complete; findings recorded under Phase 0 and proposed decisions under Decisions. Contradicts earlier assumptions: JRE provisioned at begin (not end) and `SONAR_USER_HOME` env insufficient; SARIF hashes exist when paths resolve; `end` exits 0 on partial builds and skipped projects; build code can redirect `end` via `.sonarqube/conf`.
+- 2026-11-11 - rlc decided the `dotnet`-mode trust model (fork PRs via maintainer `workflow_dispatch` only) and Sonar-rules-only import; approved pushing the Phase 1 docs branches, pushed to `guidance` and `devsecops.vlinder.ca` (no PRs yet).
+- 2026-11-11 - rlc approved the Phase 0 decisions (scanner pin, on-runner, token on command line, JRE under RUNNER_TEMP, fail on partial builds, no SARIF). Phases 2-4 unblocked. Phase 1 code implementer stopped mid-fix on a usage limit; to be resumed.
