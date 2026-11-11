@@ -1,7 +1,10 @@
 import pytest
 
 from build_scan_config import (
+    DOTNET_FORBIDDEN_KEYS,
+    build_dotnet_scan_properties,
     build_scan_properties,
+    format_scanner_args,
     parse_sastignore,
     parse_sastrc,
     translate_gitignore_pattern,
@@ -282,3 +285,109 @@ def test_build_scan_properties_scm_disabled_combines_with_sastrc():
         "exclusions:\n  paths: [\"vendor/**\"]\n", None, scm_disabled=True
     )
     assert props == ["sonar.scm.disabled=true", "sonar.exclusions=vendor/**"]
+
+
+# --- build_dotnet_scan_properties (scanner-mode: dotnet) ------------------
+
+
+FULL_SASTRC_WITHOUT_TESTS = """
+exclusions:
+  paths: ["**/Generated/**"]
+  coverage_paths: ["**/Mocks/**"]
+  duplication_paths: ["**/Migrations/**"]
+ignore:
+  - rule: "csharpsquid:S1144"
+    paths: ["Legacy/**"]
+"""
+
+
+def test_build_dotnet_scan_properties_neither_file_present_is_a_noop():
+    assert build_dotnet_scan_properties(None, None) == []
+    assert build_dotnet_scan_properties("", "") == []
+
+
+def test_build_dotnet_scan_properties_carries_exclusions_cpd_and_multicriteria():
+    # All verified accepted via /d: by the Phase 0 spike against
+    # dotnet-sonarscanner 12.1.0 + SonarQube 26.8.
+    props = build_dotnet_scan_properties(FULL_SASTRC_WITHOUT_TESTS, "bin/\n")
+    assert props == [
+        "sonar.exclusions=**/Generated/**,**/bin/**",
+        "sonar.coverage.exclusions=**/Mocks/**",
+        "sonar.cpd.exclusions=**/Migrations/**",
+        "sonar.issue.ignore.multicriteria=e1",
+        "sonar.issue.ignore.multicriteria.e1.ruleKey=csharpsquid:S1144",
+        "sonar.issue.ignore.multicriteria.e1.resourceKey=Legacy/**",
+    ]
+
+
+def test_build_dotnet_scan_properties_matches_cli_translation_when_no_tests():
+    # Same .sastrc semantics in both modes - only the token prefix differs
+    # (see format_scanner_args) - as long as tests.paths isn't involved.
+    assert build_dotnet_scan_properties(FULL_SASTRC_WITHOUT_TESTS, "*.log\n", scm_disabled=True) == (
+        build_scan_properties(FULL_SASTRC_WITHOUT_TESTS, "*.log\n", scm_disabled=True)
+    )
+
+
+def test_build_dotnet_scan_properties_scm_disabled_maps_to_sonar_scm_disabled():
+    assert build_dotnet_scan_properties(None, None, scm_disabled=True) == ["sonar.scm.disabled=true"]
+
+
+def test_build_dotnet_scan_properties_rejects_tests_paths_naming_the_field():
+    # The Scanner for .NET ignores sonar.sources/sonar.tests (test projects
+    # are decided by MSBuild), so silently dropping tests.paths would look
+    # like "noise reduction applied" when it wasn't - fail closed instead.
+    with pytest.raises(ValueError, match=r"tests\.paths"):
+        build_dotnet_scan_properties('tests:\n  paths: ["Tests/**"]\n', None)
+
+
+def test_build_dotnet_scan_properties_allows_an_empty_tests_paths_list():
+    assert build_dotnet_scan_properties("tests:\n  paths: []\n", None) == []
+
+
+def test_build_dotnet_scan_properties_still_validates_the_schema():
+    with pytest.raises(ValueError, match="unrecognized top-level key"):
+        build_dotnet_scan_properties("sonar.working.directory: /tmp\n", None)
+
+
+@pytest.mark.parametrize("key", sorted(DOTNET_FORBIDDEN_KEYS))
+def test_build_dotnet_scan_properties_never_emits_a_forbidden_key(key):
+    props = build_dotnet_scan_properties(FULL_SASTRC_WITHOUT_TESTS, "*.log\n", scm_disabled=True)
+    assert not any(prop.split("=", 1)[0] == key for prop in props)
+
+
+def test_dotnet_forbidden_keys_cover_the_spike_findings():
+    # sonar.sources/sonar.tests are ignored by the .NET scanner (with a
+    # warning); sonar.working.directory makes `begin` exit 1.
+    assert {"sonar.sources", "sonar.tests", "sonar.working.directory"} <= DOTNET_FORBIDDEN_KEYS
+
+
+def test_build_dotnet_scan_properties_guards_against_a_forbidden_key_slipping_through(monkeypatch):
+    # Defense in depth: if the shared translation ever starts emitting one
+    # of these, dotnet mode must fail rather than pass it to `begin`.
+    import build_scan_config
+
+    monkeypatch.setattr(build_scan_config, "build_scan_properties", lambda *a, **k: ["sonar.working.directory=/x"])
+    with pytest.raises(ValueError, match="sonar.working.directory"):
+        build_dotnet_scan_properties(None, None)
+
+
+# --- format_scanner_args ----------------------------------------------------
+
+
+def test_format_scanner_args_cli_uses_dash_d():
+    assert format_scanner_args(["sonar.exclusions=a/**", "sonar.scm.disabled=true"], "cli") == [
+        "-Dsonar.exclusions=a/**",
+        "-Dsonar.scm.disabled=true",
+    ]
+
+
+def test_format_scanner_args_dotnet_uses_slash_d_colon():
+    assert format_scanner_args(["sonar.exclusions=a/**", "sonar.scm.disabled=true"], "dotnet") == [
+        "/d:sonar.exclusions=a/**",
+        "/d:sonar.scm.disabled=true",
+    ]
+
+
+def test_format_scanner_args_rejects_unknown_mode():
+    with pytest.raises(ValueError, match="scanner mode"):
+        format_scanner_args([], "msbuild")

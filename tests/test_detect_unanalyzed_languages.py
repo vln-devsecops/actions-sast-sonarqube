@@ -526,6 +526,28 @@ def test_detect_unanalyzed_languages_dedupes_overlap(tmp_path):
     assert result == ["C", "C#"]
 
 
+# Trimmed from a real `dotnet-sonarscanner end` log (12.1.0, SonarQube 26.8)
+# - the log run_scan.sh passes in for scanner-mode: dotnet.
+DOTNET_END_LOG = """\
+15:23:13.295  WARNING: WARN: SCM provider autodetection failed. Please use "sonar.scm.provider" to define SCM of your project, or disable the SCM Sensor in the project settings.
+15:23:14.721  INFO: Sensor C# Project Type Information [csharp]
+15:23:14.724  INFO: Sensor C# Project Type Information [csharp] (done) | time=2ms
+15:23:16.100  INFO: ANALYSIS SUCCESSFUL, you can find the results at: http://localhost:9000/dashboard?id=k
+"""
+
+
+def test_detect_unanalyzed_languages_dotnet_mode_does_not_report_csharp_or_vbnet(tmp_path):
+    _touch(tmp_path / "Tiny.Core" / "Greeter.cs")
+    _touch(tmp_path / "Legacy" / "Module1.vb")
+    assert detect_unanalyzed_languages(DOTNET_END_LOG, tmp_path) == []
+
+
+def test_detect_unanalyzed_languages_dotnet_mode_still_reports_extension_languages(tmp_path):
+    _touch(tmp_path / "Tiny.Core" / "Greeter.cs")
+    _touch(tmp_path / "native" / "interop.cpp")
+    assert detect_unanalyzed_languages(DOTNET_END_LOG, tmp_path) == ["C++"]
+
+
 def test_detect_unanalyzed_languages_respects_exclusion_patterns(tmp_path):
     _touch(tmp_path / "vendor" / "lib.cpp")
     result = detect_unanalyzed_languages("", tmp_path, exclude_patterns=["**/vendor/**"])

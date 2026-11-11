@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Broken/Broken.csproj" />
+  <Project Path="Good/Good.csproj" />
+</Solution>

@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Tiny.Core.Tests/Tiny.Core.Tests.csproj" />
+  <Project Path="Tiny.Core/Tiny.Core.csproj" />
+</Solution>
