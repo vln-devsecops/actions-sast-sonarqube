@@ -6,6 +6,7 @@ import pytest
 from check_dotnet_projects import (
     find_skipped_log_lines,
     find_skipped_projects,
+    parse_file_metadata_paths,
     parse_project_info,
     read_analyzed_modules,
     read_compiled_files,
@@ -366,6 +367,108 @@ def test_read_compiled_files_skips_projects_without_a_listing(tmp_path, out_dir)
 
 def test_read_compiled_files_missing_out_dir(tmp_path):
     assert read_compiled_files(tmp_path / "nope") == set()
+
+
+# --- file-metadata.pb: the analyzer's full compile list ------------------------
+# A per-file <Compile Update="X.cs"><SonarQubeExclude>true</...></Compile>
+# drops X.cs from FilesToAnalyze (and, if it was the project's only file,
+# FilesToAnalyze from ProjectInfo.xml entirely) - but the Sonar analyzer
+# still writes every file of the compilation to
+# out/<n>/output-cs/file-metadata.pb: varint-length-delimited
+# FileMetadataInfo messages (1: file_path string, 2: is_generated bool,
+# 3: encoding string). Confirmed against SonarAnalyzer 10.31 live.
+
+
+def _varint(n):
+    out = bytearray()
+    while True:
+        byte = n & 0x7F
+        n >>= 7
+        out.append(byte | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def _file_metadata_pb(*paths, generated=False):
+    stream = b""
+    for path in paths:
+        raw = str(path).encode()
+        msg = b"\x0a" + _varint(len(raw)) + raw
+        if generated:
+            msg += b"\x10\x01"
+        msg += b"\x1a\x05utf-8"
+        stream += _varint(len(msg)) + msg
+    return stream
+
+
+def test_parse_file_metadata_paths_reads_every_message():
+    long_path = "/w/" + "d" * 200 + "/Long.cs"  # > 127 bytes: multi-byte varint
+    data = _file_metadata_pb("/w/A.cs", long_path) + _file_metadata_pb("/w/obj/G.cs", generated=True)
+    assert parse_file_metadata_paths(data) == ["/w/A.cs", long_path, "/w/obj/G.cs"]
+
+
+def test_parse_file_metadata_paths_empty():
+    assert parse_file_metadata_paths(b"") == []
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"\x80",  # truncated varint
+        b"\x05\x0a\x10/w",  # message length past the end of the data
+        b"\x03\x0a\x05abc",  # field length past the end of the message
+        b"\x02\x0d\x00",  # unsupported wire type (fixed32)
+    ],
+)
+def test_parse_file_metadata_paths_rejects_malformed_data(data):
+    with pytest.raises(ValueError):
+        parse_file_metadata_paths(data)
+
+
+def test_parse_file_metadata_paths_skips_unknown_varint_and_bytes_fields():
+    msg = b"\x20\x07" + b"\x2a\x02zz" + b"\x0a\x07/w/B.cs"
+    assert parse_file_metadata_paths(_varint(len(msg)) + msg) == ["/w/B.cs"]
+
+
+def test_read_compiled_files_counts_a_per_file_sonarqube_exclude_as_compiled(tmp_path, out_dir):
+    # Tiny.Core with its only file excluded per file: no FilesToAnalyze at
+    # all, but file-metadata.pb still lists it.
+    greeter = tmp_path / "Tiny.Core" / "Greeter.cs"
+    project_dir = write_project(out_dir, 0, project_info_xml("Tiny.Core", CORE_GUID, files_to_analyze=False))
+    (project_dir / "output-cs").mkdir()
+    (project_dir / "output-cs" / "file-metadata.pb").write_bytes(_file_metadata_pb(greeter))
+    assert read_compiled_files(out_dir) == {os.path.realpath(greeter)}
+
+
+def test_read_compiled_files_unions_files_to_analyze_and_file_metadata(tmp_path, out_dir):
+    a = tmp_path / "A" / "A.cs"
+    b = tmp_path / "A" / "Excluded.cs"
+    vb = tmp_path / "V" / "M.vb"
+    _with_files_to_analyze(tmp_path, out_dir, 0, "A", CORE_GUID, [a])
+    (out_dir / "0" / "output-cs").mkdir()
+    (out_dir / "0" / "output-cs" / "file-metadata.pb").write_bytes(_file_metadata_pb(a, b))
+    project_dir = write_project(out_dir, 1, project_info_xml("V", TESTS_GUID, files_to_analyze=False))
+    (project_dir / "output-vbnet").mkdir()
+    (project_dir / "output-vbnet" / "file-metadata.pb").write_bytes(_file_metadata_pb(vb))
+    assert read_compiled_files(out_dir) == {os.path.realpath(p) for p in (a, b, vb)}
+
+
+def test_read_compiled_files_ignores_malformed_file_metadata(tmp_path, out_dir):
+    # Fail toward over-reporting: an unreadable compile list adds nothing.
+    a = tmp_path / "A" / "A.cs"
+    _with_files_to_analyze(tmp_path, out_dir, 0, "A", CORE_GUID, [a])
+    (out_dir / "0" / "output-cs").mkdir()
+    (out_dir / "0" / "output-cs" / "file-metadata.pb").write_bytes(b"\x80")
+    assert read_compiled_files(out_dir) == {os.path.realpath(a)}
+
+
+def test_read_compiled_files_ignores_file_metadata_of_unfinished_projects(tmp_path, out_dir):
+    # No ProjectInfo.xml: the project didn't finish building (and the scan
+    # fails on that anyway) - its partial compile list doesn't count.
+    project_dir = write_project(out_dir, 0)
+    (project_dir / "output-cs").mkdir()
+    (project_dir / "output-cs" / "file-metadata.pb").write_bytes(_file_metadata_pb(tmp_path / "X.cs"))
+    assert read_compiled_files(out_dir) == set()
 
 
 def test_project_with_no_files_to_analyze_is_not_a_skip(out_dir):

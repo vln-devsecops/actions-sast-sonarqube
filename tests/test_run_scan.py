@@ -44,6 +44,10 @@ if [[ "$1" == "run" ]]; then
     fi
     prev="$arg"
   done
+  if [[ -n "${FAKE_DOCKER_RUN_FAIL:-}" ]]; then
+    echo "ERROR Error during SonarScanner Engine execution"
+    exit 2
+  fi
   echo "INFO  EXECUTION SUCCESS"
   exit 0
 fi
@@ -116,6 +120,25 @@ cat > "$out/0/ProjectInfo.xml" <<XML
   <AnalysisResultFiles><AnalysisResultFile Id="FilesToAnalyze" Location="$PWD/.sonarqube/conf/0/FilesToAnalyze.txt" /></AnalysisResultFiles>
 </ProjectInfo>
 XML
+if [[ "$mode" == "perfile" ]]; then
+  # Program.cs excluded per file (<Compile Update><SonarQubeExclude>):
+  # gone from FilesToAnalyze, still in the analyzer's file-metadata.pb.
+  sed -i 's#<AnalysisResultFiles>.*</AnalysisResultFiles>#<AnalysisResultFiles />#' "$out/0/ProjectInfo.xml"
+  mkdir -p "$out/0/output-cs"
+  python3 - "$PWD/Program.cs" "$out/0/output-cs/file-metadata.pb" <<'PY'
+import sys
+def varint(n):
+    out = bytearray()
+    while True:
+        out.append((n & 0x7F) | (0x80 if n > 0x7F else 0))
+        n >>= 7
+        if not n:
+            return bytes(out)
+path = sys.argv[1].encode()
+msg = b"\x0a" + varint(len(path)) + path + b"\x1a\x05utf-8"
+open(sys.argv[2], "wb").write(varint(len(msg)) + msg)
+PY
+fi
 if [[ "$mode" == "excluded" ]]; then
   mkdir -p "$out/1"
   cat > "$out/1/ProjectInfo.xml" <<'XML'
@@ -130,6 +153,10 @@ XML
   echo "21:03:51.291  The exclude flag has been set so the project will not be analyzed. Project file: /w/Excluded/Excluded.csproj"
 fi
 echo '{"scannerProperties":[{"key":"sonar.modules","value":"742E96F3-4AEE-28A3-3120-CE8630155AA7"}]}' > "$out/ScannerEngineInput.json"
+if [[ "$mode" == "badjson" ]]; then
+  # Makes check_dotnet_projects.py crash (json.load) before it decides.
+  echo '{not json' > "$out/ScannerEngineInput.json"
+fi
 if [[ "$mode" == "partial" ]]; then
   mkdir -p "$out/1"
 fi
@@ -565,6 +592,27 @@ def test_dotnet_sonarqube_exclude_project_does_not_fail(harness):
     result = _dotnet(harness, FAKE_END_MODE="excluded")
     assert result.returncode == 0, result.stderr
     assert "Compute engine task succeeded." in result.stdout
+
+
+def test_dotnet_per_file_sonarqube_exclude_is_not_reported_as_unanalyzed(harness):
+    result = _dotnet(harness, FAKE_END_MODE="perfile")
+    assert result.returncode == 0, result.stderr
+    assert "unanalyzed-languages=\n" in harness.github_output.read_text()
+
+
+def test_dotnet_check_crash_gets_its_own_failure_reason(harness):
+    # check_dotnet_projects.py dying before it writes a reason must not be
+    # mistaken for a skipped project.
+    result = _dotnet(harness, FAKE_END_MODE="badjson")
+    assert result.returncode != 0
+    assert _output(harness, "failure-reason") == "check-failed"
+
+
+def test_cli_scanner_failure_has_a_failure_reason_and_unchanged_args(harness):
+    result = harness.run(FAKE_DOCKER_RUN_FAIL="1")
+    assert result.returncode != 0
+    assert _output(harness, "failure-reason") == "scanner-failed"
+    assert _normalize_cache_mount(harness.args("docker-run.args")) == _expected_cli_args(harness)
 
 
 def test_dotnet_reports_csharp_the_build_did_not_compile(harness):
