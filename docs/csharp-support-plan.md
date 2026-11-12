@@ -1,6 +1,6 @@
 # C# support plan (living document)
 
-**Status:** Phase 0 done; Phases 1-3 PRs open and green, awaiting review; Phase 4 next · **Last updated:** 2026-11-10 · **Owner:** rlc
+**Status:** Phase 0 done; Phase 1 docs merged; #52, #53, #54 open and green, awaiting review · **Last updated:** 2026-11-10 · **Owner:** rlc
 
 Update the status table and the change log below as work lands. Do not rewrite history; append.
 
@@ -27,10 +27,10 @@ The same silent false-negative applies to every language the Community Build can
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Spike: prove approach against a real C# fixture | done; decisions approved 2026-11-11 |
-| 1 | Stop the bleeding: fix docs, warn on unanalyzed languages | PRs open: guidance#35, devsecops.vlinder.ca#136, #52 |
+| 1 | Stop the bleeding: fix docs, warn on unanalyzed languages | docs merged (guidance#35, devsecops.vlinder.ca#136); #52 open |
 | 2 | Tests first: C# fixture + specs (BDD/TDD) | PR #53 open, CI green |
 | 3 | Implement `dotnet` scan mode in `run_scan.sh` + `action.yml` | PR #53 open, CI green |
-| 4 | Workflows (`sonar-pr.yml`, `sonar-baseline.yml`) + normalization | not started |
+| 4 | Workflows (`sonar-pr.yml`, `sonar-baseline.yml`) + normalization | PR #54 open, CI green; symlink hardening in progress |
 | 5 | Docs, runbook, adopter validation, release | not started |
 
 ## Roles and orchestration
@@ -230,3 +230,5 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - 2026-11-11 - Phase 1 PRs opened: plan #51, guidance#35, devsecops.vlinder.ca#136, and #52 (detection + `fail-on-unanalyzed-languages`, after two independent review rounds that fixed: Check Run staying green when failing, steps running after cancel, log-line injection, false positives from `.baseline-checkout`/`node_modules`, non-UTF-8 filenames, submodules).
 - 2026-11-11 - Phases 2-3 pushed on `feat/dotnet-scan-mode` (tests first, then implementation; based on #52). Independent review: blocking - `SonarQubeExclude` projects failed the scan; should-fix - CI bad cases must assert their reason, token still readable by the build via the parent process environment (docs corrected), `.cs` files outside built projects reported as unanalyzed. Tamper test deferred to Phase 4 (needs the job split).
 - 2026-11-12 - Phases 2-3 PR #53 opened (stacked on #52) after three independent review rounds; also fixed: per-file `SonarQubeExclude` counted as compiled (via the analyzer's `file-metadata.pb`, fails safe), distinct `check-failed` / `scanner-failed` reasons. GitHub CI `dotnet-e2e` green: pinned rules found, every bad case failed with its expected `failure-reason`, excluded project passed, stray C# reported. Note: on the self-hosted runner, run pytest with `--basetemp` under `$HOME` (`/tmp` is noexec).
+- 2026-11-12 - guidance#35 and devsecops.vlinder.ca#136 merged: the false C# claim is corrected everywhere it was published.
+- 2026-11-12 - Phase 4 PR #54 opened (stacked on #53) after three independent review rounds that fixed: dispatch TOCTOU (dispatch now requires the reviewed `head-sha`, re-checked live before checkout), `persist-credentials: false` breaking `git fetch` for private cli callers (fetch removed; `fetch-depth: 0` already fetches all branches), the PR checkout wiping the trusted `.sast-sonarqube` and letting a PR supply its own (re-checkout + structural order test), and `pull_request_target` (now rejected in every mode - a fork's `.sastignore` could otherwise get a green required check with the base repo's token). CI on #54 green, including `pr-scan-dotnet` (first real same-repo dotnet run through the reusable workflow). Symlink hardening (pre-existing) being added to #54.
