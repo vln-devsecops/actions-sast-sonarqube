@@ -277,6 +277,13 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
+          # Under $RUNNER_TEMP, not a bare workspace-root filename: this
+          # runs before "Checkout PR head" below, so nothing PR-controlled
+          # is on the root yet today, but every intermediate file this job
+          # writes lives under $RUNNER_TEMP uniformly now (see
+          # tests/test_check_checkout_order.py's find_workspace_write_violations)
+          # rather than depending on step order to stay safe.
+          pr_context_file="$RUNNER_TEMP/pr-context.json"
           python3 .sast-sonarqube/scripts/resolve_pr_context.py \
             --event-name "$EVENT_NAME" \
             --event-file "$EVENT_PATH" \
@@ -284,7 +291,7 @@ jobs:
             --dispatch-pr-number "$DISPATCH_PR_NUMBER" \
             --dispatch-head-sha "$DISPATCH_HEAD_SHA" \
             --repo "$REPO" \
-            --out pr-context.json
+            --out "$pr_context_file"
           # Deliberately NOT keyed off the python3 invocation's own exit
           # code (python_status=$? and `exit "${python_status:-1}"`, as
           # this used to read): that's a second signal that has to stay in
@@ -295,13 +302,13 @@ jobs:
           # below run anyway. The JSON's `action` - already the one value
           # this whole step exists to compute - is the one and only thing
           # this check depends on now.
-          action="$(jq -r '.action // "error"' pr-context.json 2>/dev/null || echo error)"
-          reason="$(jq -r '.reason // "resolve_pr_context.py produced no output"' pr-context.json 2>/dev/null || echo "resolve_pr_context.py produced no output")"
-          pr_number="$(jq -r '.pr_number // ""' pr-context.json 2>/dev/null)"
-          is_fork="$(jq -r '.is_fork // ""' pr-context.json 2>/dev/null)"
-          head_sha="$(jq -r '.head_sha // ""' pr-context.json 2>/dev/null)"
-          base_sha="$(jq -r '.base_sha // ""' pr-context.json 2>/dev/null)"
-          base_ref="$(jq -r '.base_ref // ""' pr-context.json 2>/dev/null)"
+          action="$(jq -r '.action // "error"' "$pr_context_file" 2>/dev/null || echo error)"
+          reason="$(jq -r '.reason // "resolve_pr_context.py produced no output"' "$pr_context_file" 2>/dev/null || echo "resolve_pr_context.py produced no output")"
+          pr_number="$(jq -r '.pr_number // ""' "$pr_context_file" 2>/dev/null)"
+          is_fork="$(jq -r '.is_fork // ""' "$pr_context_file" 2>/dev/null)"
+          head_sha="$(jq -r '.head_sha // ""' "$pr_context_file" 2>/dev/null)"
+          base_sha="$(jq -r '.base_sha // ""' "$pr_context_file" 2>/dev/null)"
+          base_ref="$(jq -r '.base_ref // ""' "$pr_context_file" 2>/dev/null)"
           {
             echo "action=${action}"
             echo "reason=${reason}"
@@ -375,6 +382,21 @@ jobs:
       # resolving to that PR-supplied copy instead of ours.
       # tests/test_check_checkout_order.py enforces this ordering
       # structurally, not just by comment.
+      #
+      # One more hostile-tree case the re-checkout alone doesn't cover: a
+      # PR can commit `.sast-sonarqube` itself as a SYMLINK (e.g. to
+      # `../../..`, reaching outside the runner's work directory
+      # entirely). actions/checkout's own existing-directory handling
+      # follows a symlink at its target path the same way any other tool
+      # would, so the re-checkout below could end up deleting (and then
+      # writing into) whatever that symlink points at instead of a plain
+      # subdirectory. Remove it explicitly first - `rm -rf --` with NO
+      # trailing slash on the argument unlinks the symlink entry itself,
+      # it does not follow it into its target.
+      - name: Remove any PR-supplied .sast-sonarqube (may be a symlink)
+        if: contains(fromJSON('["scan","dispatch"]'), steps.pr-context.outputs.action)
+        run: rm -rf -- ./.sast-sonarqube
+
       - name: Re-checkout this action's source (the step above wiped it)
         if: contains(fromJSON('["scan","dispatch"]'), steps.pr-context.outputs.action)
         uses: actions/checkout@v7
@@ -423,16 +445,23 @@ jobs:
           # diff_findings.py's --changed-files filter is comparing the same
           # path space; otherwise, whenever project-base-dir isn't the repo
           # root, every finding looks "untouched" and gets dropped.
+          # $RUNNER_TEMP, not a bare workspace-root filename: "Checkout PR
+          # head" above already brought the PR's own tree onto the root,
+          # so a hostile PR could pre-commit a symlink named
+          # changed-files.txt here and have this redirect follow it onto
+          # a runner-owned file (tests/test_check_checkout_order.py's
+          # find_workspace_write_violations() enforces this).
+          changed_files_file="$RUNNER_TEMP/changed-files.txt"
           base_dir="${PROJECT_BASE_DIR#./}"
           base_dir="${base_dir%/}"
           if [[ -z "$base_dir" || "$base_dir" == "." ]]; then
-            git diff --name-only "${merge_base}..HEAD" > changed-files.txt
+            git diff --name-only "${merge_base}..HEAD" > "$changed_files_file"
           else
             git diff --name-only "${merge_base}..HEAD" -- "$base_dir" \
-              | sed "s#^${base_dir}/##" > changed-files.txt
+              | sed "s#^${base_dir}/##" > "$changed_files_file"
           fi
           echo "Files touched by this PR (relative to project-base-dir):"
-          cat changed-files.txt
+          cat "$changed_files_file"
 
       - name: "Look up baseline artifact (tier a: PR branch-off point)"
         id: tier-a
@@ -441,8 +470,11 @@ jobs:
           REPO: ${{ github.repository }}
           ARTIFACT_NAME: sonar-baseline-${{ steps.refs.outputs.merge-base }}
         run: |
+          # $RUNNER_TEMP: same reasoning as changed-files.txt above - a
+          # bare .baseline-artifact would extract into whatever a
+          # PR-committed symlink at that name points to.
           found="$(python3 .sast-sonarqube/scripts/find_baseline_artifact.py \
-            --repo "$REPO" --name "$ARTIFACT_NAME" --dest .baseline-artifact)"
+            --repo "$REPO" --name "$ARTIFACT_NAME" --dest "$RUNNER_TEMP/baseline-artifact")"
           echo "found=${found}" >> "$GITHUB_OUTPUT"
 
       - name: "Look up baseline artifact (tier b: target branch current HEAD)"
@@ -454,7 +486,7 @@ jobs:
           ARTIFACT_NAME: sonar-baseline-${{ steps.refs.outputs.target-head-sha }}
         run: |
           found="$(python3 .sast-sonarqube/scripts/find_baseline_artifact.py \
-            --repo "$REPO" --name "$ARTIFACT_NAME" --dest .baseline-artifact)"
+            --repo "$REPO" --name "$ARTIFACT_NAME" --dest "$RUNNER_TEMP/baseline-artifact")"
           echo "found=${found}" >> "$GITHUB_OUTPUT"
 
       - name: Record baseline resolution
@@ -574,8 +606,9 @@ jobs:
             echo "::error::Fallback baseline scan (target branch) failed with failure-reason '${REASON}', which is not a build failure - not masking it as an empty baseline. See the scan step's log above."
             exit 1
           fi
-          echo '[]' > fallback-build-failed-baseline.json
-          echo "findings-json=fallback-build-failed-baseline.json" >> "$GITHUB_OUTPUT"
+          fallback_findings_file="$RUNNER_TEMP/fallback-build-failed-baseline.json"
+          echo '[]' > "$fallback_findings_file"
+          echo "findings-json=${fallback_findings_file}" >> "$GITHUB_OUTPUT"
           note="target branch build failed in dotnet mode (failure-reason: ${REASON}) - using an empty baseline, every PR head finding is reported as new"
           echo "note=${note}" >> "$GITHUB_OUTPUT"
           echo "::warning::${note}"
@@ -588,8 +621,9 @@ jobs:
         id: fallback-empty-baseline
         if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true' && steps.fallback-base-dir-check.outputs.exists != 'true'
         run: |
-          echo '[]' > empty-baseline-findings.json
-          echo "findings-json=empty-baseline-findings.json" >> "$GITHUB_OUTPUT"
+          empty_baseline_file="$RUNNER_TEMP/empty-baseline-findings.json"
+          echo '[]' > "$empty_baseline_file"
+          echo "findings-json=${empty_baseline_file}" >> "$GITHUB_OUTPUT"
 
       # Folds the dotnet-fallback-build-failure note (if any) into the tier
       # text computed above - the one baseline_tier string that already
@@ -690,8 +724,9 @@ jobs:
           if [[ "$TIER_A_FOUND" == "true" || "$TIER_B_FOUND" == "true" ]]; then
             # -type f and a sort make the choice deterministic rather than
             # dependent on directory order; an artifact is expected to hold
-            # exactly one findings JSON.
-            mapfile -t candidates < <(find .baseline-artifact -type f -name '*.json' | sort)
+            # exactly one findings JSON. Same $RUNNER_TEMP path the tier a/b
+            # lookup steps extracted the artifact into above.
+            mapfile -t candidates < <(find "$RUNNER_TEMP/baseline-artifact" -type f -name '*.json' | sort)
             if (( ${#candidates[@]} == 0 )); then
               echo "Baseline artifact contained no JSON findings file." >&2
               exit 1
@@ -726,14 +761,16 @@ jobs:
           BASELINE_FINDINGS: ${{ steps.baseline-findings.outputs.path }}
           HEAD_FINDINGS: ${{ steps.head-scan.outputs.findings-json }}
         run: |
+          new_findings_file="$RUNNER_TEMP/new-findings.json"
+          removed_findings_file="$RUNNER_TEMP/removed-findings.json"
           python3 .sast-sonarqube/scripts/diff_findings.py \
             --baseline "$BASELINE_FINDINGS" \
             --head "$HEAD_FINDINGS" \
-            --changed-files changed-files.txt \
-            --out new-findings.json \
-            --removed-out removed-findings.json
-          echo "new-findings=new-findings.json" >> "$GITHUB_OUTPUT"
-          echo "removed-findings=removed-findings.json" >> "$GITHUB_OUTPUT"
+            --changed-files "$RUNNER_TEMP/changed-files.txt" \
+            --out "$new_findings_file" \
+            --removed-out "$removed_findings_file"
+          echo "new-findings=${new_findings_file}" >> "$GITHUB_OUTPUT"
+          echo "removed-findings=${removed_findings_file}" >> "$GITHUB_OUTPUT"
 
       - name: Apply blocking policy
         id: policy
@@ -775,7 +812,7 @@ jobs:
               --unanalyzed-languages "$UNANALYZED_LANGUAGES" \
               --fail-on-unanalyzed "$FAIL_ON_UNANALYZED" \
               --baseline-note "$BASELINE_NOTE" \
-              --result-out policy-result.json
+              --result-out "$RUNNER_TEMP/policy-result.json"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Post PR summary comment
@@ -806,7 +843,7 @@ jobs:
           python3 .sast-sonarqube/scripts/post_pr_comment.py \
             --repo "$REPO" \
             --pr-number "$PR_NUMBER" \
-            --result policy-result.json \
+            --result "$RUNNER_TEMP/policy-result.json" \
             --baseline-findings "$BASELINE_FINDINGS" \
             --removed-findings "$REMOVED_FINDINGS" \
             --baseline-tier "$BASELINE_TIER"

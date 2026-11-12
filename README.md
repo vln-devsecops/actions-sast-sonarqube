@@ -298,6 +298,19 @@ untrusted author within one job:
   matters even more, because the PR's build runs on your machine.
 - Check out with `persist-credentials: false`, so the build can't read a
   `GITHUB_TOKEN` from `.git/config`.
+- Any PR (not just `dotnet` mode's - this applies the moment the PR's
+  tree is on disk, which `cli` mode's automatic fork-PR scans do too) can
+  commit a file or a symlink at a path `sonar-pr.yml` itself later writes
+  or checks out - e.g. `.sast-sonarqube` as a symlink to `../../..`, or
+  `changed-files.txt` as a symlink to a runner-owned file. `sonar-pr.yml`
+  removes `.sast-sonarqube` (`rm -rf --`, no trailing slash, so it
+  unlinks a symlink rather than following it) immediately before
+  re-checking it out, and every intermediate file a trusted step writes
+  (`changed-files.txt`, `new-findings.json`, `policy-result.json`, the
+  extracted baseline artifact, ...) lives under `$RUNNER_TEMP` - outside
+  the checked-out tree entirely - rather than a bare workspace-root
+  filename a PR could plant a same-named symlink at.
+  `scripts/check_checkout_order.py` enforces both structurally.
 
 #### Fork PRs in `scanner-mode: dotnet`
 
