@@ -412,6 +412,22 @@ def test_dotnet_build_runs_in_project_base_dir_without_the_sonar_token(harness):
     assert "SONAR_TOKEN=" not in build_env
 
 
+def test_dotnet_build_command_inherits_nuget_auth_token_when_set(harness):
+    """Unlike SONAR_TOKEN (stripped above), NUGET_AUTH_TOKEN is NOT removed
+    from build-command's environment - action.yml scopes it to this one
+    step so it never reaches the fetch/report steps after it, but within
+    this step it reaches build-command by plain inheritance; nothing in
+    run_scan.sh needs to special-case it."""
+    result = _dotnet(
+        harness,
+        NUGET_AUTH_TOKEN="nuget-secret-token",
+        BUILD_COMMAND=f"env > {harness.log_dir}/build.env",
+    )
+    assert result.returncode == 0, result.stderr
+    build_env = (harness.log_dir / "build.env").read_text()
+    assert "NUGET_AUTH_TOKEN=nuget-secret-token" in build_env
+
+
 def test_dotnet_build_command_is_not_shell_interpolated_by_the_script(harness):
     # The command is handed to `bash -c` as-is: quoting and $-expansion are
     # the build shell's, evaluated once, inside project-base-dir.
