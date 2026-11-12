@@ -113,6 +113,22 @@ inputs:
       findings.
     required: false
     default: "false"
+  nuget-auth-token:
+    description: >-
+      Optional, scanner-mode "dotnet" only. A token/API key for a private
+      NuGet feed build-command needs to restore from (e.g. a GitHub
+      Packages or Azure Artifacts PAT). Exposed as NUGET_AUTH_TOKEN to the
+      "Run SonarQube scan" step - and so to build-command, the same way
+      SONAR_TOKEN is NOT (see run_scan.sh's `env -u SONAR_TOKEN`) - but not
+      to any other step of this action (fetch/report run as separate
+      composite steps with their own `env:`). Empty by default: most
+      callers restore from public NuGet feeds only. A pull_request from a
+      fork gets no secrets at all (GitHub's own behavior, not this
+      action's), so a private-feed restore fails loudly there rather than
+      scanning nothing - the action already fails the job on any
+      build-command failure.
+    required: false
+    default: ""
 
 outputs:
   findings-json:
@@ -184,6 +200,11 @@ runs:
         # (script injection); run_scan.sh hands it to `bash -c` as-is.
         BUILD_COMMAND: ${{ inputs.build-command }}
         IMPORT_ROSLYN_ISSUES: ${{ inputs.import-roslyn-issues }}
+        # Inherited by build-command's own subshell (run_scan.sh does NOT
+        # `env -u` it, unlike SONAR_TOKEN) - never read by begin/end, since
+        # neither needs it, and never passed to the fetch/report steps
+        # below, which have their own `env:` and don't inherit this one's.
+        NUGET_AUTH_TOKEN: ${{ inputs.nuget-auth-token }}
       run: "${{ github.action_path }}/scripts/run_scan.sh"
 
     - name: Fetch and normalize findings

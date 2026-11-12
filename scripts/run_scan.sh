@@ -32,6 +32,13 @@
 #                IMPORT_ROSLYN_ISSUES (dotnet only; anything but "true" passes
 #                sonar.cs.roslyn.ignoreIssues=true, so only Sonar's own C#
 #                rules are reported)
+#                NUGET_AUTH_TOKEN (dotnet only; optional - a private NuGet
+#                feed credential build-command needs to restore. Reaches
+#                build-command's subshell by plain inheritance - this
+#                script does NOT `env -u` it the way it does SONAR_TOKEN,
+#                since begin/end have no use for it and nothing here needs
+#                to keep it away from them; action.yml scopes it to this
+#                step only, not the fetch/report steps after it)
 set -euo pipefail
 
 : "${SONAR_HOST_URL:?SONAR_HOST_URL is required}"

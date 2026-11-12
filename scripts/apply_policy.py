@@ -82,9 +82,18 @@ def counts_by_severity(findings):
     return counts
 
 
-def build_summary(findings, blocking_findings, threshold, blocking_enabled, unanalyzed_languages=None):
+def build_summary(findings, blocking_findings, threshold, blocking_enabled, unanalyzed_languages=None, baseline_note=""):
     counts = counts_by_severity(findings)
     lines = []
+    # scanner-mode: dotnet's fallback-baseline decision (docs/csharp-support-plan.md,
+    # the 2026-11-12 "Fallback baseline in dotnet mode" decision): when the
+    # target-branch fallback scan's build fails, sonar-pr.yml uses an empty
+    # baseline instead of failing the job, and passes the same note string
+    # it puts in the job summary and PR comment here too - ahead of the
+    # finding counts below, for the same "not an afterthought" reason as
+    # the unanalyzed-languages banner just below.
+    if baseline_note:
+        lines += [f"**Baseline note:** {baseline_note}", ""]
     # A `cli`-mode scan must never present a clean result for files it
     # didn't analyze (see detect_unanalyzed_languages.py) - put this ahead
     # of the finding counts below, not after, so it can't read as an
@@ -190,6 +199,17 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
         choices=["true", "false"],
         help="Mirrors the action's fail-on-unanalyzed-languages input - when true and --unanalyzed-languages is non-empty, the Check Run concludes 'failure' too, not just the workflow job",
     )
+    parser.add_argument(
+        "--baseline-note",
+        default="",
+        help=(
+            "Optional human-readable note about the baseline this run diffed against "
+            "(e.g. scanner-mode: dotnet's fallback-build-failure empty-baseline case - "
+            "see docs/csharp-support-plan.md). Empty when there's nothing to say; "
+            "surfaced in the Check Run summary ahead of the finding counts, same as "
+            "the unanalyzed-languages banner."
+        ),
+    )
     parser.add_argument("--result-out", required=True, help="Path to write the policy result JSON to")
     args = parser.parse_args()
 
@@ -222,7 +242,9 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
     else:
         conclusion = "success"
 
-    summary = build_summary(findings, blocking_findings, args.threshold, blocking_enabled, unanalyzed_languages)
+    summary = build_summary(
+        findings, blocking_findings, args.threshold, blocking_enabled, unanalyzed_languages, args.baseline_note
+    )
     annotations = [to_annotation(f) for f in findings]
 
     result = {
@@ -234,6 +256,7 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
         "blocked": blocked,
         "check_run_url": None,
         "unanalyzed_languages": unanalyzed_languages,
+        "baseline_note": args.baseline_note,
     }
 
     # `finally` runs whether create_check_run() succeeds or raises, so this
