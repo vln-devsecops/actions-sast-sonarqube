@@ -442,8 +442,8 @@ rather than treating it as an alias of `pull_request` (GitHub documents
 payload - same `github.event.pull_request` object, same fork/base `repo`
 fields - see [events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows),
 so an alias would have been easy to make work). The reason is specific to
-what that trigger grants: it runs with the BASE repository's own
-permissions (`checks: write`) against a fork's PR-controlled content -
+what that trigger grants: it runs with the BASE repository's own token
+and secrets against a fork's PR-controlled content -
 including `.sastrc`/`.sastignore` (an `.sastignore` of `**` suppresses
 every finding). Even in `cli` mode, where the automatic fork-PR gate above
 never applies at all (the whole premise is that `cli` mode is always safe

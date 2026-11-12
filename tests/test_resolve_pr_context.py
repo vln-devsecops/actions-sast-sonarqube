@@ -50,7 +50,7 @@ def test_same_repo_pr_in_cli_mode_scans():
 @pytest.mark.parametrize("scanner_mode", ["cli", "dotnet"])
 def test_pull_request_target_errors_in_every_mode(scanner_mode):
     """pull_request_target is NOT supported, in any mode - it runs with the
-    base repository's own permissions (checks: write) against a fork's
+    base repository's own token and secrets against a fork's
     PR-controlled content (e.g. .sastignore/.sastrc), which could get a
     green required Check Run posted without cli mode's read-only-token
     protection ever kicking in. Rejecting it outright, rather than aliasing

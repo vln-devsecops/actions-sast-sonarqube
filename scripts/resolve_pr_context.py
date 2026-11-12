@@ -39,7 +39,7 @@ scanner-mode, not aliased to pull_request - despite carrying the identical
 payload shape (same github.event.pull_request object - see
 https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows,
 "pull_request_target" uses the "pull_request" webhook payload). That
-trigger runs with the BASE repository's own permissions (checks: write)
+trigger runs with the BASE repository's own token and secrets
 against a fork's PR-controlled content - including `.sastrc`/`.sastignore`
 (e.g. an `.sastignore` of `**` suppressing every finding) - so even in
 `cli` mode, where the automatic fork-PR gate below never applies at all,
@@ -95,7 +95,7 @@ BLOCK_MESSAGE = (
 # outright (ACTION_ERROR in every mode) rather than aliased here.
 PULL_REQUEST_TARGET_MESSAGE = (
     "pull_request_target is not supported by this gate: it runs with the base "
-    "repository's own permissions (checks: write) against a fork's PR-controlled "
+    "repository's own token and secrets against a fork's PR-controlled "
     "content (e.g. .sastrc/.sastignore), which could get a green required Check Run "
     "posted without a real review - cli mode's automatic-scan safety does not cover "
     "this trigger the way it covers pull_request. Use pull_request instead: "
