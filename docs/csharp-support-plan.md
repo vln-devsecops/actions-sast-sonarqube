@@ -1,6 +1,6 @@
 # C# support plan (living document)
 
-**Status:** Phase 0 done; Phase 1 PRs open, awaiting review; Phases 2-4 unblocked · **Last updated:** 2026-11-10 · **Owner:** rlc
+**Status:** Phase 0 done; Phases 1-3 PRs open and green, awaiting review; Phase 4 next · **Last updated:** 2026-11-10 · **Owner:** rlc
 
 Update the status table and the change log below as work lands. Do not rewrite history; append.
 
@@ -28,8 +28,8 @@ The same silent false-negative applies to every language the Community Build can
 |---|---|---|
 | 0 | Spike: prove approach against a real C# fixture | done; decisions approved 2026-11-11 |
 | 1 | Stop the bleeding: fix docs, warn on unanalyzed languages | PRs open: guidance#35, devsecops.vlinder.ca#136, #52 |
-| 2 | Tests first: C# fixture + specs (BDD/TDD) | not started |
-| 3 | Implement `dotnet` scan mode in `run_scan.sh` + `action.yml` | not started |
+| 2 | Tests first: C# fixture + specs (BDD/TDD) | PR #53 open, CI green |
+| 3 | Implement `dotnet` scan mode in `run_scan.sh` + `action.yml` | PR #53 open, CI green |
 | 4 | Workflows (`sonar-pr.yml`, `sonar-baseline.yml`) + normalization | not started |
 | 5 | Docs, runbook, adopter validation, release | not started |
 
@@ -200,6 +200,10 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - Can the build be isolated from the gate's inputs in one job, or does the trust boundary force a two-job split (Phase 3)?
 - Fallback baseline in `dotnet` mode when the base branch doesn't build: fail, or empty baseline with a note (Phase 4)?
 
+## Follow-ups (outside this plan's phases)
+
+- Pre-existing: `action.yml`'s fetch and report steps interpolate `${{ inputs.* }}` (project-key, sonar-host-url, and the token on `fetch_findings.py`'s argv) directly inside `run:`. Move them to `env:`. Found in the Phase 2-3 review; present since before this plan; separate `fix(action):` PR.
+
 ## Risks
 
 - Build failures masquerading as "no findings". Mitigate: fail the action if `build-command` or `end` fails, or if zero C# files were analyzed; test that explicitly.
@@ -222,3 +226,5 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - 2026-11-11 - rlc approved the Phase 0 decisions (scanner pin, on-runner, token on command line, JRE under RUNNER_TEMP, fail on partial builds, no SARIF). Phases 2-4 unblocked. Phase 1 code implementer stopped mid-fix on a usage limit; to be resumed.
 - 2026-11-11 - Confirmed in GitHub Actions (run 43020361585, throwaway branch since deleted): a composite action whose last step fails still sets its outputs from earlier steps, and the job ends failed - the Phase 1 `sonar-pr.yml` design relies on this.
 - 2026-11-11 - Phase 1 PRs opened: plan #51, guidance#35, devsecops.vlinder.ca#136, and #52 (detection + `fail-on-unanalyzed-languages`, after two independent review rounds that fixed: Check Run staying green when failing, steps running after cancel, log-line injection, false positives from `.baseline-checkout`/`node_modules`, non-UTF-8 filenames, submodules).
+- 2026-11-11 - Phases 2-3 pushed on `feat/dotnet-scan-mode` (tests first, then implementation; based on #52). Independent review: blocking - `SonarQubeExclude` projects failed the scan; should-fix - CI bad cases must assert their reason, token still readable by the build via the parent process environment (docs corrected), `.cs` files outside built projects reported as unanalyzed. Tamper test deferred to Phase 4 (needs the job split).
+- 2026-11-12 - Phases 2-3 PR #53 opened (stacked on #52) after three independent review rounds; also fixed: per-file `SonarQubeExclude` counted as compiled (via the analyzer's `file-metadata.pb`, fails safe), distinct `check-failed` / `scanner-failed` reasons. GitHub CI `dotnet-e2e` green: pinned rules found, every bad case failed with its expected `failure-reason`, excluded project passed, stray C# reported. Note: on the self-hosted runner, run pytest with `--basetemp` under `$HOME` (`/tmp` is noexec).
