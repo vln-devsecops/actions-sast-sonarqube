@@ -45,32 +45,36 @@ def test_same_repo_pr_in_cli_mode_scans():
     assert result["is_fork"] is False
 
 
-# --- pull_request_target has the identical payload shape ----------------------
+# --- pull_request_target is rejected outright, not aliased ---------------------
 
-def test_pull_request_target_same_repo_scans_in_dotnet_mode():
-    """pull_request_target carries the exact same payload as pull_request
-    (GitHub's own docs) - it must be handled by the same code path, not
-    error out as an unsupported event (that would be a backward-
-    compatibility regression for any caller using pull_request_target)."""
+@pytest.mark.parametrize("scanner_mode", ["cli", "dotnet"])
+def test_pull_request_target_errors_in_every_mode(scanner_mode):
+    """pull_request_target is NOT supported, in any mode - it runs with the
+    base repository's own permissions (checks: write) against a fork's
+    PR-controlled content (e.g. .sastignore/.sastrc), which could get a
+    green required Check Run posted without cli mode's read-only-token
+    protection ever kicking in. Rejecting it outright, rather than aliasing
+    it to pull_request, is the safe default until a caller actually needs
+    it and this gate is deliberately extended to cover it."""
     event = pull_request_event(head_repo="acme/app", base_repo="acme/app")
-    result = decide("pull_request_target", event, "dotnet", "", "")
-    assert result["action"] == ACTION_SCAN
+    result = decide("pull_request_target", event, scanner_mode, "", "")
+    assert result["action"] == ACTION_ERROR
+    assert "pull_request_target" in result["reason"]
 
 
-def test_pull_request_target_fork_in_dotnet_mode_blocks():
-    """The gate applies at least as strongly to pull_request_target - that
-    trigger is typically chosen specifically to grant elevated, base-repo
-    permissions while scanning fork content, which is a reason to keep the
-    gate, not skip it."""
-    event = pull_request_event(head_repo="someone/app-fork", base_repo="acme/app")
-    result = decide("pull_request_target", event, "dotnet", "", "")
-    assert result["action"] == ACTION_BLOCK
-
-
-def test_pull_request_target_fork_in_cli_mode_still_scans():
-    event = pull_request_event(head_repo="someone/app-fork", base_repo="acme/app")
+def test_pull_request_target_errors_even_for_a_same_repo_pr():
+    """Not just the fork case - same-repo PRs under pull_request_target are
+    rejected too, since this gate doesn't support the trigger at all."""
+    event = pull_request_event(head_repo="acme/app", base_repo="acme/app")
     result = decide("pull_request_target", event, "cli", "", "")
-    assert result["action"] == ACTION_SCAN
+    assert result["action"] == ACTION_ERROR
+
+
+def test_pull_request_target_errors_even_with_a_malformed_payload():
+    """The rejection must not depend on successfully parsing a
+    pull_request-shaped payload first - it's unconditional."""
+    result = decide("pull_request_target", {"number": 1}, "dotnet", "", "")
+    assert result["action"] == ACTION_ERROR
 
 
 # --- fork PR fixture -----------------------------------------------------------
