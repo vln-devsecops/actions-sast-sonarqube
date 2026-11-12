@@ -435,21 +435,26 @@ behalf is *which runner pool* to use (see the `runner-type` input's own
 description) - that's caller-specific policy, not something event data
 can answer.
 
-**`pull_request_target`.** This gate treats `pull_request_target` as an
-alias of `pull_request`, not a separate/unsupported case: GitHub documents
-`pull_request_target` as using the identical `pull_request` webhook payload
-(same `github.event.pull_request` object, same fork/base `repo` fields -
-see [events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)),
-so `resolve_pr_context.py`'s `decide()` runs the exact same fork-detection
-logic for it. Treating it as an alias, not a third case, matters for a
-reason beyond compatibility: callers often choose `pull_request_target`
-specifically to grant a workflow *elevated, base-repo* permissions while
-still scanning a fork's content - exactly the scenario the trust boundary
-exists for, so the gate applies at least as strictly there, not less. We
-considered the simpler "skip the gate for `cli` mode regardless of
-event_name" and rejected it: it would leave `dotnet` mode broken (an
-unsupported-event error) for any `pull_request_target` caller, where the
-alias fixes both modes correctly instead of only papering over `cli`'s.
+**`pull_request_target` is NOT supported, in any `scanner-mode`** -
+`resolve_pr_context.py`'s `decide()` returns an error for it outright,
+rather than treating it as an alias of `pull_request` (GitHub documents
+`pull_request_target` as using the identical `pull_request` webhook
+payload - same `github.event.pull_request` object, same fork/base `repo`
+fields - see [events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows),
+so an alias would have been easy to make work). The reason is specific to
+what that trigger grants: it runs with the BASE repository's own
+permissions (`checks: write`) against a fork's PR-controlled content -
+including `.sastrc`/`.sastignore` (an `.sastignore` of `**` suppresses
+every finding). Even in `cli` mode, where the automatic fork-PR gate above
+never applies at all (the whole premise is that `cli` mode is always safe
+to run automatically), a fork author under `pull_request_target` could get
+a green REQUIRED Check Run posted with a write-scoped token and no review
+in the loop - `cli` mode's safety argument doesn't cover this trigger the
+way it covers `pull_request`. Nothing at this project's pre-`dotnet`-mode
+baseline documented or supported `pull_request_target`, and no known
+caller uses it, so rejecting it outright is the conservative default;
+supporting it would need its own deliberate design, not a side effect of
+one event payload happening to look like another's.
 
 ### Blocking policy
 

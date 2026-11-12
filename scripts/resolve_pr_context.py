@@ -28,19 +28,27 @@ so github.event/github.event_name here are the CALLER's (e.g.
 github.event.pull_request.* directly off the event payload here valid;
 sonar-pr.yml's "Post PR summary comment" step already relied on the same
 fact (github.event.pull_request.head.repo.full_name) before this script
-existed. pull_request_target carries the identical payload shape as
-pull_request (same github.event.pull_request object - see
+existed. The one thing the event payload can NOT carry is a
+workflow_dispatch run's PR number or reviewed head SHA - on.workflow_call
+doesn't receive the caller's github.event.inputs, so those come in as
+workflow_call inputs instead (--dispatch-pr-number / --dispatch-head-sha
+below), resolved by the caller from its own workflow_dispatch inputs.
+
+pull_request_target is explicitly REJECTED (ACTION_ERROR), in every
+scanner-mode, not aliased to pull_request - despite carrying the identical
+payload shape (same github.event.pull_request object - see
 https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows,
-"pull_request_target" uses the "pull_request" webhook payload), so it's
-handled by the exact same code path below, not a separate case - including
-the fork-PR gate, which matters at least as much there (pull_request_target
-callers typically want elevated, base-repo permissions against fork code,
-which is a reason to apply the gate harder, not skip it). The one thing
-the event payload can NOT carry is a workflow_dispatch run's PR number or
-reviewed head SHA - on.workflow_call doesn't receive the caller's
-github.event.inputs, so those come in as workflow_call inputs instead
-(--dispatch-pr-number / --dispatch-head-sha below), resolved by the caller
-from its own workflow_dispatch inputs.
+"pull_request_target" uses the "pull_request" webhook payload). That
+trigger runs with the BASE repository's own permissions (checks: write)
+against a fork's PR-controlled content - including `.sastrc`/`.sastignore`
+(e.g. an `.sastignore` of `**` suppressing every finding) - so even in
+`cli` mode, where the automatic fork-PR gate below never applies at all,
+a fork author could get a green REQUIRED Check Run posted with a
+write-scoped token, with no review in the loop. Nothing at the original
+325d938 baseline documented or supported pull_request_target; no known
+caller uses it; rejecting it outright is the safe default until it's
+deliberately designed for, not something to backport support for via an
+alias as a side effect of adding dotnet mode.
 """
 import argparse
 import json
@@ -83,9 +91,16 @@ BLOCK_MESSAGE = (
     "after a real scan of reviewed code."
 )
 
-# pull_request_target carries the identical payload shape as pull_request -
-# see the module docstring - so both are handled by the same code path.
-_PULL_REQUEST_EVENT_NAMES = ("pull_request", "pull_request_target")
+# See the module docstring for why pull_request_target is rejected
+# outright (ACTION_ERROR in every mode) rather than aliased here.
+PULL_REQUEST_TARGET_MESSAGE = (
+    "pull_request_target is not supported by this gate: it runs with the base "
+    "repository's own permissions (checks: write) against a fork's PR-controlled "
+    "content (e.g. .sastrc/.sastignore), which could get a green required Check Run "
+    "posted without a real review - cli mode's automatic-scan safety does not cover "
+    "this trigger the way it covers pull_request. Use pull_request instead: "
+    "same-repo PRs run automatically, fork PRs only via a maintainer's workflow_dispatch."
+)
 
 
 def _repo_full_name(repo):
@@ -99,17 +114,21 @@ def decide(event_name, event, scanner_mode, dispatch_pr_number, dispatch_head_sh
     the event payload; see the module docstring).
 
     Returns a dict with at least "action" (one of the ACTION_* constants
-    above) and "reason" (human-readable, one line). The pull_request(_target)
-    path also carries pr_number/is_fork/head_sha/base_sha/base_ref straight
-    off the payload - no API call needed. The workflow_dispatch path only
+    above) and "reason" (human-readable, one line). The pull_request path
+    also carries pr_number/is_fork/head_sha/base_sha/base_ref straight off
+    the payload - no API call needed. The workflow_dispatch path only
     validates INPUT SHAPE here (pr_number/head_sha well-formed) - the live
     re-check against GitHub's current PR state happens in
     verify_dispatch_pr_context() below, which needs a network call main()
-    makes, not something decide() can do on its own.
+    makes, not something decide() can do on its own. pull_request_target
+    is rejected outright, in every scanner_mode - see the module docstring.
     """
     event = event or {}
 
-    if event_name in _PULL_REQUEST_EVENT_NAMES:
+    if event_name == "pull_request_target":
+        return {"action": ACTION_ERROR, "reason": PULL_REQUEST_TARGET_MESSAGE}
+
+    if event_name == "pull_request":
         pr = event.get("pull_request")
         if not isinstance(pr, dict):
             return {
