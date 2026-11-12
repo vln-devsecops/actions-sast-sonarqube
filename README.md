@@ -74,6 +74,21 @@ the PR head scan, never browsed for issue authorship. Set
 `baseline-scm-history: true` on `sonar-pr.yml` to fetch full history and
 enable blame analysis on the fallback scan instead.
 
+**`scanner-mode: dotnet` and the fallback scan.** The fallback path builds
+the target branch too (same `build-command`), so it can fail on code the PR
+never touched - stale history, a solution added after that commit, a flaky
+restore. If the failure really is that build (`scripts/baseline_fallback.py`
+checks the action's `failure-reason` output against a fixed set of
+build-related reasons), `sonar-pr.yml` uses an empty baseline instead -
+every PR head finding is reported as new - and says so in the job summary,
+the Check Run, and the PR comment, via the same baseline-tier text the
+artifact tiers above already use. A failure for any OTHER reason (the
+ephemeral SonarQube instance itself down, a bad scanner install, ...) is
+never reinterpreted that way - it fails the job exactly as before this
+existed, so an infrastructure problem can't hide behind what looks like a
+merely permissive baseline. The PR head's own scan is unaffected either
+way: a real head build failure still fails the job exactly as today.
+
 `actions/download-artifact` alone can only see artifacts from the *same*
 run. Finding "whichever artifact happens to be named
 `sonar-baseline-<sha>`" needs a name-filtered listing across the whole repo,
@@ -164,6 +179,11 @@ action to use it instead of the CLI. Inputs:
 | `build-command` | `""` | Required with `dotnet`, rejected with `cli`. Builds the code, e.g. `dotnet build MySolution.sln`. Runs with `bash -c` from `project-base-dir`, between `begin` and `end`. `SONAR_TOKEN` is removed from its environment, but the build can still read the token (see the trust note). |
 | `dotnet-version` | `10.0.x` | Passed to `actions/setup-dotnet`, which runs only in `dotnet` mode. |
 | `import-roslyn-issues` | `"false"` | `"true"` also imports the project's own Roslyn analyzer issues (StyleCop, CA*, compiler warnings). By default only Sonar's own C# rules are reported (`sonar.cs.roslyn.ignoreIssues=true`). |
+| `nuget-auth-token` | `""` | Optional. A credential for a private NuGet feed `build-command` needs to restore from. Exposed as `NUGET_AUTH_TOKEN` to the "Run SonarQube scan" step (and so to `build-command`) only - never to `begin`/`end` or the fetch/report steps after it. On `sonar-pr.yml`/`sonar-baseline.yml` this is a `secrets:` input, not a plain `with:` one (see below). |
+
+On the reusable workflows, `timeout-minutes` (default `30`, unchanged) may
+need raising in `dotnet` mode: the PR workflow's fallback path is a second
+restore + build + scan on top of the head scan's, in one job.
 
 ```yaml
 # a .NET repo, calling the action directly (SonarQube already up - see
@@ -271,12 +291,109 @@ untrusted author within one job:
 - Run it automatically only for PRs from branches in the same repository
   (trusted authors).
 - Run it for PRs from forks only through a maintainer-triggered
-  `workflow_dispatch`, never automatically on `pull_request`. The reusable
-  workflows' support for this is a separate, upcoming change.
+  `workflow_dispatch`, never automatically on `pull_request`. `sonar-pr.yml`
+  enforces this itself (see "Fork PRs in `scanner-mode: dotnet`" below) -
+  it's not left to the caller.
 - On self-hosted runners, the caller's fork-PR guard on `runner-type`
   matters even more, because the PR's build runs on your machine.
 - Check out with `persist-credentials: false`, so the build can't read a
   `GITHUB_TOKEN` from `.git/config`.
+
+#### Fork PRs in `scanner-mode: dotnet`
+
+`sonar-pr.yml` gates this itself, before checking out or building anything:
+on a `pull_request` event, `scanner-mode: dotnet`, and a head repository
+that isn't the base repository, the job fails immediately with a message
+explaining that a maintainer must run the workflow for this PR, and the job
+summary names the exact `workflow_dispatch` input to use - it never reaches
+`actions/checkout` for the PR's code, let alone `build-command`.
+`scanner-mode: cli` is unaffected (it never executes PR code, so the gate
+doesn't apply to it - a fork PR still gets a full `cli`-mode scan
+automatically, same as today).
+
+To scan that PR anyway, a maintainer dispatches the SAME workflow manually
+with its PR number, via a `pr-number` input the caller wires through from
+its own `workflow_dispatch` trigger:
+
+```yaml
+# consumer repo: .github/workflows/sonarqube.yml
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: PR number to dispatch a dotnet-mode scan for (fork PRs only)
+        required: false
+        type: string
+
+jobs:
+  pr-scan:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    uses: vln-devsecops/actions-sast-sonarqube/.github/workflows/sonar-pr.yml@v1
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+      actions: read
+    with:
+      scanner-mode: dotnet
+      build-command: dotnet build MySolution.sln
+      pr-number: ${{ github.event.inputs.pr-number }}
+```
+
+That dispatched run resolves the PR number to its *current* head via the
+GitHub API (`scripts/resolve_pr_context.py`), checks out and scans that
+head for real, and posts the named Check Run (`check-name` input) on that
+exact head SHA - so a branch rule requiring that check only goes green
+after a real scan actually ran, not merely because someone clicked a
+button. Unlike the automatic `pull_request` case, a `workflow_dispatch` run
+is NOT subject to GitHub's read-only `GITHUB_TOKEN` downgrade (that
+downgrade is specific to the `pull_request` event from a fork, not to
+`workflow_dispatch` - see
+[events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)),
+so it also posts the PR comment if `post-pr-comment` is enabled. Dispatching
+a workflow itself needs write access to the repository (see
+[manually running a workflow](https://docs.github.com/en/actions/using-workflows/manually-running-a-workflow)),
+which is exactly the "maintainer" boundary this gate relies on.
+
+A private NuGet feed credential, when `build-command` needs one, is wired
+as a `secrets:` input on both reusable workflows - not a plain `with:`
+one, since it's a secret:
+
+```yaml
+    with:
+      scanner-mode: dotnet
+      build-command: dotnet build MySolution.sln
+    secrets:
+      nuget-auth-token: ${{ secrets.MY_PRIVATE_FEED_TOKEN }}
+      # or: secrets: inherit
+```
+
+A `pull_request` from a fork gets no secrets at all except a read-only
+`GITHUB_TOKEN` (GitHub's own behavior, not this action's) - moot for the
+automatic case here, since the fork-PR gate above blocks it before any
+build runs, but still true for a maintainer-dispatched scan of a fork PR
+whose `build-command` restores from a private feed: wire the secret through
+the SAME way regardless, and a missing one just means that restore fails
+loudly (the action already fails the job on any `build-command` failure)
+rather than silently scanning nothing.
+
+#### Reusable-workflow event context
+
+`sonar-pr.yml`'s fork-PR gate (and its "Post PR summary comment" step, which
+predates it) read `github.event_name` and `github.event.pull_request.*`
+directly. Inside a workflow invoked via `workflow_call`, these are
+inherited from whatever triggered the overall run (the CALLER's event -
+e.g. `"pull_request"`), never `"workflow_call"` itself. This isn't spelled
+out explicitly in GitHub's own reference docs, but is consistently reported
+in GitHub's own community forum (e.g.
+[Community Discussion #160735](https://github.com/orgs/community/discussions/160735),
+[#174203](https://github.com/orgs/community/discussions/174203)) and is
+what this file already relied on, live, before the fork-PR gate existed.
+What a reusable workflow genuinely can't resolve on a caller's behalf is
+*which runner pool* to use (see the `runner-type` input's own description)
+- that's caller-specific policy, not something event data can answer.
 
 ### Blocking policy
 
@@ -340,12 +457,24 @@ tracks the newest `1.x.y` release (picks up minor and patch updates); `@v1.2`
 tracks the newest `1.2.z` patch only; an exact `@v1.2.3` never moves. Prefer
 `@v1` unless you need tighter pinning.
 
-**Fork PRs**: GitHub downgrades `GITHUB_TOKEN` to read-only for a
-`pull_request` event from a fork, regardless of the `permissions:` block
-above. `sonar-pr.yml` still runs the full scan and diff, and still blocks
-the job on policy the same as any other PR - it just can't publish the
-Check Run or PR comment, since both need write access it doesn't have.
-Findings are reported in the job's step summary instead in that case.
+For a `.NET` repo (`scanner-mode: dotnet`), including the fork-PR
+`workflow_dispatch` escape hatch and an optional private NuGet feed
+credential, see "Fork PRs in `scanner-mode: dotnet`" above - the `on:`/
+`with:`/`secrets:` wiring differs enough from the plain-CLI example above
+that it's shown there, next to the trust note it depends on, rather than
+duplicated here.
+
+**Fork PRs, `scanner-mode: cli`** (default): GitHub downgrades
+`GITHUB_TOKEN` to read-only for a `pull_request` event from a fork,
+regardless of the `permissions:` block above. `sonar-pr.yml` still runs the
+full scan and diff, and still blocks the job on policy the same as any
+other PR - it just can't publish the Check Run or PR comment, since both
+need write access it doesn't have. Findings are reported in the job's step
+summary instead in that case.
+
+**Fork PRs, `scanner-mode: dotnet`**: NOT scanned automatically at all -
+see "Fork PRs in `scanner-mode: dotnet`" above. `cli` mode's read-only-token
+behavior above doesn't apply here because the job never gets that far.
 
 ## Reducing noise: `.sastrc` and `.sastignore`
 

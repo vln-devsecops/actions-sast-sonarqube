@@ -66,13 +66,29 @@ on:
         default: false
       runner-type:
         description: >-
-          Value for runs-on. Defaults to ubuntu-latest; callers that want a
-          self-hosted runner must resolve any fork-PR guard themselves and
-          pass the already-resolved value here - a reusable workflow's own
-          github.event_name is always "workflow_call", not the caller's
-          actual triggering event, so it can't evaluate that condition
-          itself (github.event.pull_request.head.repo.full_name is
-          similarly unavailable in this context).
+          Value for runs-on. Defaults to ubuntu-latest. Reusable-workflow
+          event context note: contrary to what an earlier version of this
+          comment claimed, github.event_name/github.event here are NOT
+          always "workflow_call" - they're inherited from whatever
+          triggered the overall run (e.g. "pull_request"), the same as
+          github.event.pull_request.head.repo.full_name is (the "Post PR
+          summary comment" step below, and the fork-PR gate in scanner-mode
+          dotnet, both rely on exactly that). See
+          https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+          and https://github.com/orgs/community/discussions/160735 - not
+          spelled out explicitly in GitHub's own docs, but consistently
+          reported there and already relied on, live, by this file. What
+          this workflow genuinely can't do is pick a self-hosted runner
+          pool on a caller's behalf - that's a caller-specific policy
+          (which labels exist, which are "sensitive"), not something to
+          infer from event data - so callers that want one still resolve
+          and pass it here themselves. On a self-hosted runner, scanner-mode
+          dotnet's build-command runs PR code ON THAT RUNNER (not inside the
+          Docker container cli mode uses), so a caller's fork-PR guard on
+          this input matters even more there - the fork-PR gate below stops
+          an AUTOMATIC fork-PR run, but a self-hosted pool's own capacity/
+          isolation policy for TRUSTED same-repo PRs is still the caller's
+          to set.
         type: string
         default: ubuntu-latest
       fail-on-unanalyzed-languages:
@@ -87,6 +103,76 @@ on:
           only - matches this action's v1 behavior.
         type: boolean
         default: false
+      timeout-minutes:
+        description: >-
+          Value for the job's timeout-minutes. Default 30 (this job's
+          historical hard-coded value, so existing callers see no change).
+          scanner-mode dotnet may need more: it's a second restore + build +
+          scan on the fallback path (two builds in one job) on top of the
+          cli path's single scan, so a repo with a slow build should raise
+          this.
+        type: number
+        default: 30
+      scanner-mode:
+        description: >-
+          Forwarded to every scan this job runs (PR head, and the fallback
+          baseline scan when it fires). "cli" (default, unchanged): never
+          executes PR code, so the fork-PR gate below never applies to it -
+          a PR from a fork still gets a full scan automatically, same as
+          today. "dotnet": runs build-command - the code under scan - on
+          the runner; see this input's own description on action.yml and
+          the README's trust note before using it. In dotnet mode, a PR
+          from a fork is NOT scanned automatically by this job - see
+          pr-number below and the README's "Fork PRs" / C# sections.
+        type: string
+        default: cli
+      build-command:
+        description: >-
+          Forwarded to every scan this job runs, same as scanner-mode.
+          Required with scanner-mode dotnet, rejected otherwise - see
+          action.yml's build-command input.
+        type: string
+        default: ""
+      dotnet-version:
+        description: Forwarded to every scan this job runs, same as scanner-mode. See action.yml's dotnet-version input.
+        type: string
+        default: "10.0.x"
+      import-roslyn-issues:
+        description: Forwarded to every scan this job runs, same as scanner-mode. See action.yml's import-roslyn-issues input.
+        type: boolean
+        default: false
+      pr-number:
+        description: >-
+          Only meaningful with github.event_name == workflow_dispatch - the
+          PR number a maintainer is dispatching a scanner-mode: dotnet scan
+          for, on a PR this job otherwise can't run automatically for (a
+          fork PR - see the "Trust boundary" gate below). Wire this from
+          the caller's own workflow_dispatch input - its
+          github.event.inputs.pr-number - via this input's `with:` entry
+          when invoking this workflow (see the README for the exact YAML).
+          Ignored (unused) on a pull_request-triggered run - that event
+          already carries its own PR number.
+        type: string
+        default: ""
+    secrets:
+      nuget-auth-token:
+        description: >-
+          Optional, scanner-mode dotnet only. Forwarded to action.yml's
+          nuget-auth-token input on every scan this job runs - a credential
+          for a private NuGet feed build-command needs to restore from.
+          Exposed to the build step only (see action.yml); never to begin/
+          end or any other step of this workflow. A pull_request from a
+          fork gets NO secrets at all except a read-only GITHUB_TOKEN
+          (GitHub's own behavior) - moot for the automatic case in dotnet
+          mode, since the fork-PR gate below blocks it before any build
+          runs, but still true for a maintainer-triggered workflow_dispatch
+          scan of a fork PR's build-command restoring from a private feed:
+          wire this secret through the caller's own `secrets:` block (or
+          `secrets: inherit`) if that scan needs it. A missing/empty value
+          here just means build-command restores from public feeds only;
+          the action already fails loudly on any build-command failure
+          rather than silently scanning nothing.
+        required: false
 
 jobs:
   pr-scan:
@@ -94,57 +180,32 @@ jobs:
     # Every long step below has its own deadline (wait_for_sonarqube.sh 300s,
     # run_scan.sh 600s), but image pulls and `docker compose up` don't - so
     # cap the job rather than inherit the 6-hour default on a wedged runner.
-    timeout-minutes: 30
+    # See the timeout-minutes input's description for why dotnet-mode
+    # callers may want to raise this.
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
       checks: write
       pull-requests: write
       actions: read
     steps:
-      - name: Checkout PR head
-        uses: actions/checkout@v7
+      - name: Set up Python
+        # Moved ahead of every checkout (including "Checkout PR head"
+        # below): the fork-PR gate (see "Resolve PR/dispatch context" and
+        # "Gate" below) has to run, and decide whether to check out the
+        # PR's code at all, before that checkout happens - and it needs
+        # Python to run resolve_pr_context.py.
+        uses: actions/setup-python@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-
-      - name: Fetch base branch history
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: git fetch origin "$BASE_REF"
-
-      - name: Resolve merge-base and target HEAD
-        id: refs
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-          TARGET_HEAD_SHA: ${{ github.event.pull_request.base.sha }}
-          PROJECT_BASE_DIR: ${{ inputs.project-base-dir }}
-        run: |
-          merge_base="$(git merge-base "origin/${BASE_REF}" HEAD)"
-          echo "merge-base=${merge_base}" >> "$GITHUB_OUTPUT"
-          echo "target-head-sha=${TARGET_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-
-          # SonarQube reports each finding's path relative to
-          # project-base-dir, not the repo root - but `git diff` paths are
-          # always repo-root-relative. Scope+strip to project-base-dir so
-          # diff_findings.py's --changed-files filter is comparing the same
-          # path space; otherwise, whenever project-base-dir isn't the repo
-          # root, every finding looks "untouched" and gets dropped.
-          base_dir="${PROJECT_BASE_DIR#./}"
-          base_dir="${base_dir%/}"
-          if [[ -z "$base_dir" || "$base_dir" == "." ]]; then
-            git diff --name-only "${merge_base}..HEAD" > changed-files.txt
-          else
-            git diff --name-only "${merge_base}..HEAD" -- "$base_dir" \
-              | sed "s#^${base_dir}/##" > changed-files.txt
-          fi
-          echo "Files touched by this PR (relative to project-base-dir):"
-          cat changed-files.txt
+          python-version: "3.12"
 
       # This reusable workflow is meant to be called by other repos, so it
       # can't assume its own composite action (action.yml) is checked out at
       # the workspace root - that root holds the CALLER's code. Fetch this
       # action's own repo, pinned to the exact ref this workflow file itself
-      # is running from, into a side directory instead.
+      # is running from, into a side directory instead. Safe to run ahead of
+      # the fork-PR gate below (unlike "Checkout PR head"): this checks out
+      # OUR OWN trusted source at a pinned ref, never the PR's code.
       - name: Resolve this action's own source ref
         id: action-source
         env:
@@ -167,11 +228,113 @@ jobs:
           repository: ${{ steps.action-source.outputs.repo }}
           ref: ${{ steps.action-source.outputs.ref }}
           path: .sast-sonarqube
+          persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      # --- Trust boundary: scanner-mode dotnet fork-PR gate -----------------
+      # (docs/csharp-support-plan.md, "Trust boundary" and the 2026-11-12
+      # decision). scanner-mode: dotnet runs build-command on the runner, so
+      # it can only run automatically for a pull request from a branch in
+      # the SAME repository - a fork PR gets it only via a maintainer-
+      # triggered workflow_dispatch naming the PR number. cli mode never
+      # executes PR code, so this never blocks it - see resolve_pr_context.py.
+      - name: Resolve PR/dispatch context
+        id: pr-context
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          python3 .sast-sonarqube/scripts/resolve_pr_context.py \
+            --event-name "${{ github.event_name }}" \
+            --event-file "${{ github.event_path }}" \
+            --scanner-mode "${{ inputs.scanner-mode }}" \
+            --dispatch-pr-number "${{ inputs.pr-number }}" \
+            --repo "${{ github.repository }}" \
+            --out pr-context.json
+          python_status=$?
+          action="$(jq -r '.action // "error"' pr-context.json 2>/dev/null || echo error)"
+          reason="$(jq -r '.reason // "resolve_pr_context.py produced no output"' pr-context.json 2>/dev/null || echo "resolve_pr_context.py produced no output")"
+          pr_number="$(jq -r '.pr_number // ""' pr-context.json 2>/dev/null)"
+          is_fork="$(jq -r '.is_fork // ""' pr-context.json 2>/dev/null)"
+          head_sha="$(jq -r '.head_sha // ""' pr-context.json 2>/dev/null)"
+          base_sha="$(jq -r '.base_sha // ""' pr-context.json 2>/dev/null)"
+          base_ref="$(jq -r '.base_ref // ""' pr-context.json 2>/dev/null)"
+          {
+            echo "action=${action}"
+            echo "reason=${reason}"
+            echo "pr-number=${pr_number}"
+            echo "is-fork=${is_fork}"
+            echo "head-sha=${head_sha}"
+            echo "base-sha=${base_sha}"
+            echo "base-ref=${base_ref}"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$action" == "error" ]]; then
+            echo "::error::${reason}"
+            {
+              echo "### SonarQube Community: could not resolve PR/dispatch context"
+              echo "$reason"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "${python_status:-1}"
+          fi
+
+      - name: "Gate: scanner-mode dotnet blocks an automatic fork-PR scan"
+        # Fails BEFORE "Checkout PR head" below ever runs (every later step
+        # in this job defaults to `if: success()`, so a failure here skips
+        # them automatically) - the PR's code is never checked out, let
+        # alone built, for a fork PR this job can't trust. A maintainer
+        # re-runs it as a workflow_dispatch naming the PR number instead
+        # (see the pr-number input) - that run skips this gate (its
+        # action is "dispatch", not "block") and posts the named Check Run
+        # on the PR's real head SHA once it finishes, same as any other run.
+        if: steps.pr-context.outputs.action == 'block'
+        env:
+          REASON: ${{ steps.pr-context.outputs.reason }}
+        run: |
+          {
+            echo "### SonarQube Community: scanner-mode dotnet blocked for this fork PR"
+            echo "$REASON"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::${REASON}"
+          exit 1
+
+      - name: Checkout PR head
+        uses: actions/checkout@v7
         with:
-          python-version: "3.12"
+          ref: ${{ steps.pr-context.outputs.head-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch base branch history
+        env:
+          BASE_REF: ${{ steps.pr-context.outputs.base-ref }}
+        run: git fetch origin "$BASE_REF"
+
+      - name: Resolve merge-base and target HEAD
+        id: refs
+        env:
+          BASE_REF: ${{ steps.pr-context.outputs.base-ref }}
+          TARGET_HEAD_SHA: ${{ steps.pr-context.outputs.base-sha }}
+          PROJECT_BASE_DIR: ${{ inputs.project-base-dir }}
+        run: |
+          merge_base="$(git merge-base "origin/${BASE_REF}" HEAD)"
+          echo "merge-base=${merge_base}" >> "$GITHUB_OUTPUT"
+          echo "target-head-sha=${TARGET_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
+          # SonarQube reports each finding's path relative to
+          # project-base-dir, not the repo root - but `git diff` paths are
+          # always repo-root-relative. Scope+strip to project-base-dir so
+          # diff_findings.py's --changed-files filter is comparing the same
+          # path space; otherwise, whenever project-base-dir isn't the repo
+          # root, every finding looks "untouched" and gets dropped.
+          base_dir="${PROJECT_BASE_DIR#./}"
+          base_dir="${base_dir%/}"
+          if [[ -z "$base_dir" || "$base_dir" == "." ]]; then
+            git diff --name-only "${merge_base}..HEAD" > changed-files.txt
+          else
+            git diff --name-only "${merge_base}..HEAD" -- "$base_dir" \
+              | sed "s#^${base_dir}/##" > changed-files.txt
+          fi
+          echo "Files touched by this PR (relative to project-base-dir):"
+          cat changed-files.txt
 
       - name: "Look up baseline artifact (tier a: PR branch-off point)"
         id: tier-a
@@ -222,9 +385,10 @@ jobs:
         if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ steps.pr-context.outputs.base-sha }}
           path: .baseline-checkout
           fetch-depth: ${{ inputs.baseline-scm-history && 0 || 1 }}
+          persist-credentials: false
 
       # project-base-dir might not exist yet on the target branch at all -
       # e.g. this PR is the one introducing it. That's not a misconfiguration
@@ -264,9 +428,14 @@ jobs:
       # itself the subject of this PR's gate - failing the job over the
       # baseline's unanalyzed files would block a PR that didn't introduce
       # them. The PR's own head-scan below is where that input applies.
+      # continue-on-error only in dotnet mode: see "Handle a dotnet fallback
+      # build failure" below for why (the 2026-11-12 "Fallback baseline in
+      # dotnet mode" decision) - cli mode keeps failing this job immediately
+      # on any fallback-scan failure, exactly as before this input existed.
       - name: Scan target branch HEAD (fallback path only)
         id: fallback-base-scan
         if: steps.fallback-base-dir-check.outputs.exists == 'true'
+        continue-on-error: ${{ inputs.scanner-mode == 'dotnet' }}
         uses: ./.sast-sonarqube
         with:
           sonar-host-url: http://localhost:9000
@@ -276,6 +445,46 @@ jobs:
           sast-config-path: ${{ inputs.sast-config-path }}
           sast-ignore-path: ${{ inputs.sast-ignore-path }}
           scm-disabled: ${{ inputs.baseline-scm-history && 'false' || 'true' }}
+          scanner-mode: ${{ inputs.scanner-mode }}
+          build-command: ${{ inputs.build-command }}
+          dotnet-version: ${{ inputs.dotnet-version }}
+          import-roslyn-issues: ${{ inputs.import-roslyn-issues }}
+          nuget-auth-token: ${{ secrets.nuget-auth-token }}
+
+      # scanner-mode: dotnet, 2026-11-12 decision ("Fallback baseline in
+      # dotnet mode"): if the target branch's own build fails here, use an
+      # empty baseline (every PR head finding is reported as new) instead of
+      # failing this job over code the PR didn't touch - but only when the
+      # failure really was the build/analysis, not an unrelated problem
+      # (SonarQube itself down, a bad scanner install, ...) that just
+      # happens to also hit this step; baseline_fallback.py tells those
+      # apart from the action's own failure-reason output. The "exit 1"
+      # branch below re-raises everything else - continue-on-error above
+      # suppressed this step's own natural job failure, so without this,
+      # a non-build failure here would silently let the job carry on with
+      # no baseline at all, resolved as a hard error two steps down instead
+      # of here with a clear reason.
+      - name: Handle a dotnet fallback build failure
+        id: fallback-dotnet-build-failure
+        if: inputs.scanner-mode == 'dotnet' && steps.fallback-base-scan.outcome == 'failure'
+        env:
+          REASON: ${{ steps.fallback-base-scan.outputs.failure-reason }}
+        run: |
+          set -euo pipefail
+          is_build_failure="$(python3 .sast-sonarqube/scripts/baseline_fallback.py --reason "$REASON")"
+          if [[ "$is_build_failure" != "true" ]]; then
+            echo "::error::Fallback baseline scan (target branch) failed with failure-reason '${REASON}', which is not a build failure - not masking it as an empty baseline. See the scan step's log above."
+            exit 1
+          fi
+          echo '[]' > fallback-build-failed-baseline.json
+          echo "findings-json=fallback-build-failed-baseline.json" >> "$GITHUB_OUTPUT"
+          note="target branch build failed in dotnet mode (failure-reason: ${REASON}) - using an empty baseline, every PR head finding is reported as new"
+          echo "note=${note}" >> "$GITHUB_OUTPUT"
+          echo "::warning::${note}"
+          {
+            echo "### SonarQube Community baseline resolution (dotnet fallback)"
+            echo "$note"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Use empty baseline (target branch lacks project-base-dir)
         id: fallback-empty-baseline
@@ -283,6 +492,24 @@ jobs:
         run: |
           echo '[]' > empty-baseline-findings.json
           echo "findings-json=empty-baseline-findings.json" >> "$GITHUB_OUTPUT"
+
+      # Folds the dotnet-fallback-build-failure note (if any) into the tier
+      # text computed above - the one baseline_tier string that already
+      # flows to the job summary and (below) the PR comment, rather than a
+      # separate channel for this one case.
+      - name: Finalize baseline tier text
+        id: baseline-final
+        if: always()
+        env:
+          BASE_TIER: ${{ steps.baseline.outputs.tier }}
+          BUILD_FAILURE_NOTE: ${{ steps.fallback-dotnet-build-failure.outputs.note }}
+        run: |
+          if [[ -n "$BUILD_FAILURE_NOTE" ]]; then
+            tier="${BASE_TIER} - ${BUILD_FAILURE_NOTE}"
+          else
+            tier="$BASE_TIER"
+          fi
+          echo "tier=${tier}" >> "$GITHUB_OUTPUT"
 
       - name: Scan PR head
         id: head-scan
@@ -295,6 +522,11 @@ jobs:
           sast-config-path: ${{ inputs.sast-config-path }}
           sast-ignore-path: ${{ inputs.sast-ignore-path }}
           fail-on-unanalyzed-languages: ${{ inputs.fail-on-unanalyzed-languages }}
+          scanner-mode: ${{ inputs.scanner-mode }}
+          build-command: ${{ inputs.build-command }}
+          dotnet-version: ${{ inputs.dotnet-version }}
+          import-roslyn-issues: ${{ inputs.import-roslyn-issues }}
+          nuget-auth-token: ${{ secrets.nuget-auth-token }}
 
       # The full current finding set (not just this PR's new findings, which
       # the Check Run annotations already cover inline-on-diff) - the
@@ -316,7 +548,7 @@ jobs:
         if: "!cancelled() && steps.head-scan.outputs.findings-report != ''"
         uses: actions/upload-artifact@v7
         with:
-          name: sonar-pr-${{ github.event.pull_request.number }}-findings-report
+          name: sonar-pr-${{ steps.pr-context.outputs.pr-number }}-findings-report
           path: ${{ steps.head-scan.outputs.findings-report }}
           retention-days: ${{ inputs.findings-report-retention-days }}
 
@@ -345,6 +577,7 @@ jobs:
           TIER_B_FOUND: ${{ steps.tier-b.outputs.found }}
           FALLBACK_BASE_DIR_EXISTS: ${{ steps.fallback-base-dir-check.outputs.exists }}
           FALLBACK_BASE_SCAN_FINDINGS: ${{ steps.fallback-base-scan.outputs.findings-json }}
+          FALLBACK_DOTNET_BUILD_FAILURE_FINDINGS: ${{ steps.fallback-dotnet-build-failure.outputs.findings-json }}
           FALLBACK_EMPTY_BASELINE_FINDINGS: ${{ steps.fallback-empty-baseline.outputs.findings-json }}
         run: |
           set -euo pipefail
@@ -361,6 +594,8 @@ jobs:
               echo "Baseline artifact contained ${#candidates[@]} JSON files; using ${candidates[0]}." >&2
             fi
             path="${candidates[0]}"
+          elif [[ -n "$FALLBACK_DOTNET_BUILD_FAILURE_FINDINGS" ]]; then
+            path="$FALLBACK_DOTNET_BUILD_FAILURE_FINDINGS"
           elif [[ "$FALLBACK_BASE_DIR_EXISTS" == "true" ]]; then
             path="$FALLBACK_BASE_SCAN_FINDINGS"
           else
@@ -400,13 +635,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA: ${{ steps.pr-context.outputs.head-sha }}
           NEW_FINDINGS: ${{ steps.diff.outputs.new-findings }}
           SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
           BLOCKING: ${{ inputs.blocking }}
           CHECK_NAME: ${{ inputs.check-name }}
           UNANALYZED_LANGUAGES: ${{ steps.head-scan.outputs.unanalyzed-languages }}
           FAIL_ON_UNANALYZED: ${{ inputs.fail-on-unanalyzed-languages }}
+          BASELINE_NOTE: ${{ steps.fallback-dotnet-build-failure.outputs.note }}
         run: |
           set -o pipefail
           # GitHub downgrades GITHUB_TOKEN to read-only for a pull_request
@@ -416,7 +652,11 @@ jobs:
           # PR summary comment" step below is skipped outright. The job
           # summary is the one place findings are guaranteed to be visible
           # either way, so capture apply_policy.py's own summary there too,
-          # not just the baseline-resolution tier.
+          # not just the baseline-resolution tier. HEAD_SHA is this job's
+          # own pr-context resolution, not github.event.pull_request.head.sha
+          # directly - on a workflow_dispatch run that's the PR's resolved
+          # head SHA (see resolve_pr_context.py), so the Check Run still
+          # lands on the right commit.
           {
             echo "### SonarQube Community blocking policy"
             python3 .sast-sonarqube/scripts/apply_policy.py \
@@ -428,6 +668,7 @@ jobs:
               --check-name "$CHECK_NAME" \
               --unanalyzed-languages "$UNANALYZED_LANGUAGES" \
               --fail-on-unanalyzed "$FAIL_ON_UNANALYZED" \
+              --baseline-note "$BASELINE_NOTE" \
               --result-out policy-result.json
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -437,17 +678,24 @@ jobs:
         # pull_request event from a fork regardless of the permissions:
         # block this workflow requests. Skip outright rather than let it
         # 403: the job summary (see the policy step above) is where a fork
-        # PR's findings are reported instead.
+        # PR's findings are reported instead. The read-only downgrade is
+        # specific to the pull_request event, NOT workflow_dispatch - a
+        # maintainer-dispatched run gets the normal GITHUB_TOKEN permissions
+        # from the permissions: block above even when scanning a fork's PR,
+        # so it always attempts to post (see
+        # https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+        # and the write-access requirement to dispatch a workflow at
+        # https://docs.github.com/en/actions/using-workflows/manually-running-a-workflow).
         if: >-
           always() && inputs.post-pr-comment && steps.diff.outcome == 'success'
-          && github.event.pull_request.head.repo.full_name == github.repository
+          && (github.event_name == 'workflow_dispatch' || steps.pr-context.outputs.is-fork != 'true')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.pr-context.outputs.pr-number }}
           BASELINE_FINDINGS: ${{ steps.baseline-findings.outputs.path }}
           REMOVED_FINDINGS: ${{ steps.diff.outputs.removed-findings }}
-          BASELINE_TIER: ${{ steps.baseline.outputs.tier }}
+          BASELINE_TIER: ${{ steps.baseline-final.outputs.tier }}
         run: |
           python3 .sast-sonarqube/scripts/post_pr_comment.py \
             --repo "$REPO" \

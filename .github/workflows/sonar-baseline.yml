@@ -44,13 +44,16 @@ on:
         default: .sastignore
       runner-type:
         description: >-
-          Value for runs-on. Defaults to ubuntu-latest; callers that want a
-          self-hosted runner must resolve any fork-PR guard themselves and
-          pass the already-resolved value here - a reusable workflow's own
-          github.event_name is always "workflow_call", not the caller's
-          actual triggering event, so it can't evaluate that condition
-          itself (github.event.pull_request.head.repo.full_name is
-          similarly unavailable in this context).
+          Value for runs-on. Defaults to ubuntu-latest. This job only ever
+          runs on a push to a baseline branch (see the job's own `if:`
+          below), which already required the pusher to have write access -
+          there's no fork-PR trust question here the way sonar-pr.yml has
+          one, so callers don't need to resolve anything themselves before
+          passing a self-hosted pool here. On a self-hosted runner, note
+          that scanner-mode dotnet's build-command still runs ON THAT
+          RUNNER (not inside the Docker container cli mode uses) - the same
+          consideration as any other build step on that pool, not specific
+          to this action.
         type: string
         default: ubuntu-latest
       fail-on-unanalyzed-languages:
@@ -66,6 +69,47 @@ on:
           matches this action's v1 behavior.
         type: boolean
         default: false
+      timeout-minutes:
+        description: >-
+          Value for the job's timeout-minutes. Default 30 (this job's
+          historical hard-coded value, so existing callers see no change).
+          scanner-mode dotnet may need more - a build-integrated scan takes
+          longer than the plain CLI's; see sonar-pr.yml's equivalent input.
+        type: number
+        default: 30
+      scanner-mode:
+        description: >-
+          Forwarded to this job's scan. "cli" (default, unchanged) or
+          "dotnet" - see action.yml's scanner-mode input and the README's
+          C# section.
+        type: string
+        default: cli
+      build-command:
+        description: >-
+          Forwarded to this job's scan. Required with scanner-mode dotnet,
+          rejected otherwise - see action.yml's build-command input.
+        type: string
+        default: ""
+      dotnet-version:
+        description: Forwarded to this job's scan. See action.yml's dotnet-version input.
+        type: string
+        default: "10.0.x"
+      import-roslyn-issues:
+        description: Forwarded to this job's scan. See action.yml's import-roslyn-issues input.
+        type: boolean
+        default: false
+    secrets:
+      nuget-auth-token:
+        description: >-
+          Optional, scanner-mode dotnet only. Forwarded to action.yml's
+          nuget-auth-token input - a credential for a private NuGet feed
+          build-command needs to restore from. Exposed to the build step
+          only (see action.yml). This job only ever runs on a push to a
+          baseline branch, never a fork PR, so the "fork PRs get no
+          secrets" caveat on sonar-pr.yml's equivalent secret doesn't apply
+          here - wire it through the caller's `secrets:` block (or
+          `secrets: inherit`) the same way regardless.
+        required: false
 
 jobs:
   baseline-scan:
@@ -74,12 +118,16 @@ jobs:
     # Every long step below has its own deadline (wait_for_sonarqube.sh 300s,
     # run_scan.sh 600s), but image pulls and `docker compose up` don't - so
     # cap the job rather than inherit the 6-hour default on a wedged runner.
-    timeout-minutes: 30
+    # See the timeout-minutes input's description for why dotnet-mode
+    # callers may want to raise this.
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # This reusable workflow is meant to be called by other repos, so it
       # can't assume its own composite action (action.yml) is checked out at
@@ -108,6 +156,7 @@ jobs:
           repository: ${{ steps.action-source.outputs.repo }}
           ref: ${{ steps.action-source.outputs.ref }}
           path: .sast-sonarqube
+          persist-credentials: false
 
       - name: Raise vm.max_map_count for Elasticsearch
         run: sudo sysctl -w vm.max_map_count=262144
@@ -136,6 +185,11 @@ jobs:
           sast-config-path: ${{ inputs.sast-config-path }}
           sast-ignore-path: ${{ inputs.sast-ignore-path }}
           fail-on-unanalyzed-languages: ${{ inputs.fail-on-unanalyzed-languages }}
+          scanner-mode: ${{ inputs.scanner-mode }}
+          build-command: ${{ inputs.build-command }}
+          dotnet-version: ${{ inputs.dotnet-version }}
+          import-roslyn-issues: ${{ inputs.import-roslyn-issues }}
+          nuget-auth-token: ${{ secrets.nuget-auth-token }}
 
       - name: Upload baseline findings artifact
         # Bundles the machine-readable JSON (what sonar-pr.yml's baseline
