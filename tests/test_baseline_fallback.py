@@ -1,0 +1,52 @@
+import pytest
+
+from baseline_fallback import BUILD_FAILURE_REASONS, is_build_failure_reason
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["build-command-failed", "no-analyzable-projects", "project-not-built", "project-not-analyzed", "check-failed"],
+)
+def test_build_failure_reasons_are_classified_as_build_failures(reason):
+    assert is_build_failure_reason(reason) is True
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "begin-failed",
+        "end-failed",
+        "scanner-install-failed",
+        "no-report-task",
+        "ce-task-failed",
+        "ce-task-timeout",
+        "invalid-sast-config",
+        "build-command-required",
+        "build-command-not-allowed",
+        "invalid-scanner-mode",
+        "project-base-dir-missing",
+        "scanner-failed",
+    ],
+)
+def test_infra_and_config_reasons_are_not_classified_as_build_failures(reason):
+    """These must NOT masquerade as "the base didn't build" - doing so
+    would hide an unrelated problem (e.g. SonarQube itself being down)
+    behind an empty baseline that looks like a merely permissive choice."""
+    assert is_build_failure_reason(reason) is False
+
+
+@pytest.mark.parametrize("reason", ["", None, "   ", "not-a-real-reason-code"])
+def test_unknown_or_empty_reason_is_not_a_build_failure(reason):
+    assert is_build_failure_reason(reason) is False
+
+
+def test_every_build_failure_reason_is_a_real_run_scan_failure_reason_code():
+    """Pin the exact set so a future run_scan.sh rename doesn't silently
+    stop matching here."""
+    assert BUILD_FAILURE_REASONS == {
+        "build-command-failed",
+        "no-analyzable-projects",
+        "project-not-built",
+        "project-not-analyzed",
+        "check-failed",
+    }
