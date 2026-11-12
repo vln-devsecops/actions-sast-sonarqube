@@ -34,11 +34,13 @@
 #                rules are reported)
 #                NUGET_AUTH_TOKEN (dotnet only; optional - a private NuGet
 #                feed credential build-command needs to restore. Reaches
-#                build-command's subshell by plain inheritance - this
-#                script does NOT `env -u` it the way it does SONAR_TOKEN,
-#                since begin/end have no use for it and nothing here needs
-#                to keep it away from them; action.yml scopes it to this
-#                step only, not the fetch/report steps after it)
+#                build-command's subshell by plain inheritance, but IS
+#                `env -u`'d from the dotnet tool install and the begin/end
+#                scanner invocations - none of those restore anything, so
+#                the credential has no use there, same "scoped to build
+#                only" promise action.yml's nuget-auth-token input makes;
+#                action.yml also keeps it out of the fetch/report steps
+#                after this one)
 set -euo pipefail
 
 : "${SONAR_HOST_URL:?SONAR_HOST_URL is required}"
@@ -178,7 +180,11 @@ scan_with_dotnet() {
   DOTNET_TOOL_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/dotnet-sonarscanner.XXXXXX")"
   BUILD_LOG_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/dotnet-build-log.XXXXXX")"
   echo "Installing dotnet-sonarscanner ${version}..."
-  if ! dotnet tool install dotnet-sonarscanner --version "$version" --tool-path "$DOTNET_TOOL_DIR"; then
+  # env -u NUGET_AUTH_TOKEN: this installs OUR OWN pinned tool, not the
+  # code under scan - scope the credential to build-command only (its
+  # description promises "build only"), the same direction SONAR_TOKEN is
+  # already scoped away from build-command below.
+  if ! env -u NUGET_AUTH_TOKEN dotnet tool install dotnet-sonarscanner --version "$version" --tool-path "$DOTNET_TOOL_DIR"; then
     fail scanner-install-failed "Could not install dotnet-sonarscanner ${version} (is the .NET SDK set up?)."
   fi
   local scanner="${DOTNET_TOOL_DIR}/dotnet-sonarscanner"
@@ -203,7 +209,11 @@ scan_with_dotnet() {
   # sonar.projectBaseDir: pinned to PROJECT_BASE_DIR so .sastrc/.sastignore
   #   paths resolve against the same root as in cli mode, rather than the
   #   scanner's own guess (since v8: the projects' common root).
-  if ! (cd "$ABS_PROJECT_BASE_DIR" && "$scanner" begin \
+  # env -u NUGET_AUTH_TOKEN on begin/end too: neither runs build-command or
+  # restores anything, so the credential has no use there - keep it scoped
+  # to build-command only, matching the secret's own "build only" promise
+  # (action.yml's nuget-auth-token input description).
+  if ! (cd "$ABS_PROJECT_BASE_DIR" && env -u NUGET_AUTH_TOKEN "$scanner" begin \
     "/k:${PROJECT_KEY}" \
     "/d:sonar.host.url=${SONAR_HOST_URL}" \
     "/d:sonar.token=${SONAR_TOKEN}" \
@@ -227,7 +237,7 @@ scan_with_dotnet() {
     fail build-command-failed "build-command exited with status ${build_status}; not running dotnet-sonarscanner end."
   fi
 
-  if ! (cd "$ABS_PROJECT_BASE_DIR" && "$scanner" end "/d:sonar.token=${SONAR_TOKEN}") 2>&1 | tee "$SCANNER_LOG_FILE"; then
+  if ! (cd "$ABS_PROJECT_BASE_DIR" && env -u NUGET_AUTH_TOKEN "$scanner" end "/d:sonar.token=${SONAR_TOKEN}") 2>&1 | tee "$SCANNER_LOG_FILE"; then
     if grep -q "No analyzable projects were found" "$SCANNER_LOG_FILE"; then
       fail no-analyzable-projects "dotnet-sonarscanner end failed: the build compiled no C# project it could analyze."
     fi
