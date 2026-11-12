@@ -32,14 +32,18 @@ import sys
 # no-report-task, ce-task-failed, ce-task-timeout, invalid-sast-config,
 # build-command-required/-not-allowed, invalid-scanner-mode,
 # project-base-dir-missing, scanner-failed (cli mode has no fallback-build
-# concept at all).
+# concept at all), and check-failed - that one specifically means
+# check_dotnet_projects.py itself crashed before reaching a verdict (see
+# run_scan.sh's "No reason written: the check itself crashed" branch), which
+# is evidence the CHECK is broken, not evidence about whether the target
+# branch's code builds. Treating it as a build failure would use an empty
+# baseline to paper over a check bug instead of failing loudly on it.
 BUILD_FAILURE_REASONS = frozenset(
     {
         "build-command-failed",
         "no-analyzable-projects",
         "project-not-built",
         "project-not-analyzed",
-        "check-failed",
     }
 )
 
