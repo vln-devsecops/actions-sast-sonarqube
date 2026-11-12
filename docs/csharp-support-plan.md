@@ -193,12 +193,14 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - 2026-11-11 - Phase 1 detects unanalyzed C#/VB.NET from the CLI's `Your project contains ... files which cannot be analyzed` log line - still logged by 26.8, not exposed via CE warnings.
 - 2026-11-11 - Reject the SARIF import route (rlc) - wrong rule keys, every issue typed VULNERABILITY, no quality profile.
 
+- 2026-11-12 - Fork PRs in `dotnet` mode (rlc): the fork PR's SAST job fails with "a maintainer must run the SAST workflow for this PR" and skips the build; the maintainer-triggered `workflow_dispatch` run posts the named Check Run on the PR's head SHA, so a branch rule requiring that check only goes green after a real scan.
+- 2026-11-12 - Fallback baseline in `dotnet` mode that fails to build (rlc): use an empty baseline (every head finding is new) and say so in the job summary, Check Run and PR comment; the PR head's own scan must still succeed.
+
 ## Open questions
 
 - Runner requirements: do all target runners (including self-hosted, hardened `noexec` /tmp ones) allow the .NET SDK install and the scanner's JRE?
 - Does Community Build apply any C# rule/feature limits relevant to our blocking policy (`apply_policy.py`)?
 - Can the build be isolated from the gate's inputs in one job, or does the trust boundary force a two-job split (Phase 3)?
-- Fallback baseline in `dotnet` mode when the base branch doesn't build: fail, or empty baseline with a note (Phase 4)?
 
 ## Follow-ups (outside this plan's phases)
 
