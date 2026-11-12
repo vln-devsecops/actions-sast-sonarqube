@@ -118,11 +118,71 @@ def _project_dirs(out_dir):
             yield entry, project_dir
 
 
+def _read_varint(data, pos):
+    """Decode one protobuf base-128 varint at data[pos:]; return (value,
+    new_pos). Raises ValueError if it runs past the end of the data."""
+    value = 0
+    shift = 0
+    while True:
+        if pos >= len(data):
+            raise ValueError("truncated varint")
+        byte = data[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, pos
+        shift += 7
+
+
+def parse_file_metadata_paths(data):
+    """Return the file paths in a SonarAnalyzer `file-metadata.pb`: a
+    stream of varint-length-delimited FileMetadataInfo messages whose
+    field 1 is the file path (field 2 is_generated, field 3 encoding).
+    Unknown varint/length-delimited fields are skipped; anything else
+    malformed raises ValueError, so a caller can ignore the whole file
+    rather than trust a half-parsed one."""
+    paths = []
+    pos = 0
+    while pos < len(data):
+        length, pos = _read_varint(data, pos)
+        end = pos + length
+        if end > len(data):
+            raise ValueError("message runs past the end of the data")
+        while pos < end:
+            tag, pos = _read_varint(data, pos)
+            field, wire_type = tag >> 3, tag & 0x07
+            if wire_type == 0:
+                _, pos = _read_varint(data, pos)
+            elif wire_type == 2:
+                size, pos = _read_varint(data, pos)
+                if pos + size > end:
+                    raise ValueError("field runs past the end of its message")
+                if field == 1:
+                    paths.append(data[pos : pos + size].decode("utf-8"))
+                pos += size
+            else:
+                raise ValueError(f"unsupported protobuf wire type {wire_type}")
+    return paths
+
+
+# Where the Sonar analyzer writes its per-project outputs (C#, VB.NET).
+ANALYZER_OUTPUT_DIR_NAMES = ("output-cs", "output-vbnet")
+
+
 def read_compiled_files(out_dir):
-    """Return the set of real paths of every source file any project's
-    `FilesToAnalyze` lists - i.e. what the build compiled, including
-    `<SonarQubeExclude>` projects (deliberately excluded, still built).
-    Missing/malformed entries contribute nothing."""
+    """Return the set of real paths of every source file the build
+    compiled, for each project that finished building:
+
+    - its `FilesToAnalyze` listing - including `<SonarQubeExclude>`
+      projects (deliberately excluded, still built and listed); and
+    - the Sonar analyzer's own `output-cs|output-vbnet/file-metadata.pb`,
+      which lists every file of the compilation - including files
+      excluded one by one with `<Compile Update="..."><SonarQubeExclude>`,
+      which FilesToAnalyze drops (taking the whole FilesToAnalyze entry
+      with it when that was the project's only file).
+
+    Missing or malformed entries contribute nothing, so an unreadable
+    record over-reports unanalyzed files rather than hiding them."""
     out_dir = os.fspath(out_dir)
     if not os.path.isdir(out_dir):
         return set()
@@ -132,13 +192,22 @@ def read_compiled_files(out_dir):
         try:
             with open(info_path, encoding="utf-8") as f:
                 listing = parse_project_info(f.read())["files_to_analyze"]
-            if not listing:
-                continue
-            # The scanner writes this file with a UTF-8 BOM.
-            with open(listing, encoding="utf-8-sig") as f:
-                compiled.update(os.path.realpath(line.strip()) for line in f if line.strip())
         except (OSError, ValueError):
             continue
+        if listing:
+            try:
+                # The scanner writes this file with a UTF-8 BOM.
+                with open(listing, encoding="utf-8-sig") as f:
+                    compiled.update(os.path.realpath(line.strip()) for line in f if line.strip())
+            except OSError:
+                pass
+        for output_dir in ANALYZER_OUTPUT_DIR_NAMES:
+            metadata_path = os.path.join(project_dir, output_dir, "file-metadata.pb")
+            try:
+                with open(metadata_path, "rb") as f:
+                    compiled.update(os.path.realpath(p) for p in parse_file_metadata_paths(f.read()))
+            except (OSError, ValueError):
+                continue
     return compiled
 
 

@@ -232,6 +232,16 @@ Scope and limits:
   by default. `bin/`, `obj/`, gitignored files and `.sastrc`/`.sastignore`
   exclusions are skipped. C, C++, Objective-C and Swift files are reported
   as in `cli` mode.
+
+  "Compiled" means the file appears in the scanner's own records: the
+  project's `FilesToAnalyze` list, or the Sonar analyzer's
+  `file-metadata.pb`, which lists every file in the compilation. So
+  `<SonarQubeExclude>` counts as compiled, both for a whole project and for
+  a single file (`<Compile Update="X.cs"><SonarQubeExclude>true</SonarQubeExclude></Compile>`).
+  A file kept on disk but removed from the build with
+  `<Compile Remove="X.cs" />` really isn't compiled, so it is reported. To
+  silence that, list its path in `.sastignore` or in `.sastrc`
+  `exclusions.paths`.
 - Coverage import (`sonar.cs.opencover.reportsPaths` and the like) is not
   supported, so `exclusions.coverage_paths` has no effect on C#.
 - `dotnet-sonarscanner` is pinned in `.config/dotnet-tools.json`, and

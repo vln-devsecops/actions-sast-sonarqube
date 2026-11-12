@@ -240,7 +240,12 @@ scan_with_dotnet() {
     local reason
     reason="$(cat "$reason_file")"
     rm -f "$reason_file"
-    fail "${reason:-project-not-analyzed}" "Failing: not every project the build touched was analyzed (see above)."
+    # No reason written: the check itself crashed before deciding - say
+    # so, rather than claim a project was skipped.
+    if [[ -z "$reason" ]]; then
+      fail check-failed "check_dotnet_projects.py failed before reaching a verdict (see above)."
+    fi
+    fail "$reason" "Failing: not every project the build touched was analyzed (see above)."
   fi
   rm -f "$reason_file"
 }
@@ -260,7 +265,7 @@ scan_with_cli() {
   rm -rf "${ABS_PROJECT_BASE_DIR}/.scannerwork"
 
   echo "Scanning ${ABS_PROJECT_BASE_DIR} as project '${PROJECT_KEY}'..."
-  docker run --rm \
+  if ! docker run --rm \
     --network host \
     --user "$(id -u):$(id -g)" \
     -e SONAR_HOST_URL="${SONAR_HOST_URL}" \
@@ -275,24 +280,26 @@ scan_with_cli() {
     -Dsonar.projectBaseDir=/usr/src \
     -Dsonar.working.directory=/usr/src/.scannerwork \
     "${EXTRA_SCANNER_ARGS[@]}" \
-    2>&1 | tee "$SCANNER_LOG_FILE"
-    # ^ sonar.working.directory: the current SonarScanner Engine
-    #   (sonar-scanner-cli 12.x / engine 8.x) defaults this to
-    #   /tmp/.scannerwork inside the container - not a path under
-    #   projectBaseDir - so report-task.txt (read back from the host below)
-    #   would never reach the bind mount without this override.
-    # EXTRA_SCANNER_ARGS: any -D properties derived from the consumer's
-    #   optional .sastrc/.sastignore files (see build_scan_config.py above),
-    #   plus -Dsonar.scm.disabled=true when SCM_DISABLED=true - empty when
-    #   neither file exists and SCM_DISABLED is unset.
-    # tee SCANNER_LOG_FILE: the plain CLI never analyzes C#/VB.NET (indexes
-    #   the files, runs no rules) and instead logs a fixed WARN line naming
-    #   the language - see detect_unanalyzed_languages.py. `tee` still
-    #   streams the scanner's output live to the job log while also
-    #   capturing it to a file this script can grep after the fact; `set -o
-    #   pipefail` above (part of `set -euo pipefail`) is what keeps `docker
-    #   run`'s own exit status - not tee's - the one that can fail this
-    #   script, same as before this feature existed.
+    2>&1 | tee "$SCANNER_LOG_FILE"; then
+    fail scanner-failed "sonar-scanner-cli failed (see the scanner output above)."
+  fi
+  # ^ sonar.working.directory: the current SonarScanner Engine
+  #   (sonar-scanner-cli 12.x / engine 8.x) defaults this to
+  #   /tmp/.scannerwork inside the container - not a path under
+  #   projectBaseDir - so report-task.txt (read back from the host below)
+  #   would never reach the bind mount without this override.
+  # EXTRA_SCANNER_ARGS: any -D properties derived from the consumer's
+  #   optional .sastrc/.sastignore files (see build_scan_config.py above),
+  #   plus -Dsonar.scm.disabled=true when SCM_DISABLED=true - empty when
+  #   neither file exists and SCM_DISABLED is unset.
+  # tee SCANNER_LOG_FILE: the plain CLI never analyzes C#/VB.NET (indexes
+  #   the files, runs no rules) and instead logs a fixed WARN line naming
+  #   the language - see detect_unanalyzed_languages.py. `tee` still
+  #   streams the scanner's output live to the job log while also
+  #   capturing it to a file this script can grep after the fact; `set -o
+  #   pipefail` above (part of `set -euo pipefail`) is what keeps `docker
+  #   run`'s own exit status - not tee's - the one the `if !` above
+  #   checks (failure-reason scanner-failed).
 }
 
 if [[ "$SCANNER_MODE" == "dotnet" ]]; then
