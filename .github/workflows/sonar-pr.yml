@@ -285,7 +285,16 @@ jobs:
             --dispatch-head-sha "$DISPATCH_HEAD_SHA" \
             --repo "$REPO" \
             --out pr-context.json
-          python_status=$?
+          # Deliberately NOT keyed off the python3 invocation's own exit
+          # code (python_status=$? and `exit "${python_status:-1}"`, as
+          # this used to read): that's a second signal that has to stay in
+          # lockstep with the JSON's own `action` field by construction,
+          # not by anything enforced here, so a future resolve_pr_context.py
+          # change that writes action: error without also calling
+          # sys.exit(1) would silently exit 0 here and let every step
+          # below run anyway. The JSON's `action` - already the one value
+          # this whole step exists to compute - is the one and only thing
+          # this check depends on now.
           action="$(jq -r '.action // "error"' pr-context.json 2>/dev/null || echo error)"
           reason="$(jq -r '.reason // "resolve_pr_context.py produced no output"' pr-context.json 2>/dev/null || echo "resolve_pr_context.py produced no output")"
           pr_number="$(jq -r '.pr_number // ""' pr-context.json 2>/dev/null)"
@@ -308,7 +317,7 @@ jobs:
               echo "### SonarQube Community: could not resolve PR/dispatch context"
               echo "$reason"
             } >> "$GITHUB_STEP_SUMMARY"
-            exit "${python_status:-1}"
+            exit 1
           fi
 
       - name: "Gate: scanner-mode dotnet blocks an automatic fork-PR scan"
@@ -348,7 +357,34 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # actions/checkout above, with fetch-depth: 0, already fetched every
+      # "Checkout PR head" above has no `path:` - it targets the WORKSPACE
+      # ROOT. actions/checkout deletes every entry under its target
+      # directory first whenever that directory has no `.git` yet
+      # (git-directory-helper.ts's prepareExistingDirectory():
+      # `remove = true` when `<path>/.git` doesn't exist, then it rmRF's
+      # every entry under `<path>`) - and the root never got a `.git` from
+      # "Checkout this action's source" above, since THAT checkout's own
+      # `path:` is the .sast-sonarqube subdirectory, not the root. So the
+      # checkout above just deleted .sast-sonarqube along with everything
+      # else that was under the root. Re-fetch it now, before anything
+      # below reads from it again - without this, every scan/dispatch run
+      # breaks (the scripts and the compose file are gone), and worse, a
+      # PR that committed its OWN `.sast-sonarqube/` (this gate never
+      # blocks that in cli mode, since it only applies to dotnet) would
+      # have nothing standing between it and `uses: ./.sast-sonarqube`
+      # resolving to that PR-supplied copy instead of ours.
+      # tests/test_check_checkout_order.py enforces this ordering
+      # structurally, not just by comment.
+      - name: Re-checkout this action's source (the step above wiped it)
+        if: contains(fromJSON('["scan","dispatch"]'), steps.pr-context.outputs.action)
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.action-source.outputs.repo }}
+          ref: ${{ steps.action-source.outputs.ref }}
+          path: .sast-sonarqube
+          persist-credentials: false
+
+      # "Checkout PR head" above, with fetch-depth: 0, already fetched every
       # branch into refs/remotes/origin/* ("fetch-depth: Number of commits
       # to fetch. 0 indicates all history for all branches and tags" -
       # https://github.com/actions/checkout#readme; confirmed in its source,
