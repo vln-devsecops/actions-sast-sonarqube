@@ -311,9 +311,10 @@ summary names the exact `workflow_dispatch` input to use - it never reaches
 doesn't apply to it - a fork PR still gets a full `cli`-mode scan
 automatically, same as today).
 
-To scan that PR anyway, a maintainer dispatches the SAME workflow manually
-with its PR number, via a `pr-number` input the caller wires through from
-its own `workflow_dispatch` trigger:
+To scan that PR anyway, a maintainer first reviews the PR's actual head
+commit, then dispatches the SAME workflow manually with the PR number AND
+the exact SHA of the commit just reviewed, via `pr-number` and `head-sha`
+inputs the caller wires through from its own `workflow_dispatch` trigger:
 
 ```yaml
 # consumer repo: .github/workflows/sonarqube.yml
@@ -324,6 +325,10 @@ on:
     inputs:
       pr-number:
         description: PR number to dispatch a dotnet-mode scan for (fork PRs only)
+        required: false
+        type: string
+      head-sha:
+        description: Full commit SHA you reviewed on that PR (required alongside pr-number)
         required: false
         type: string
 
@@ -340,22 +345,57 @@ jobs:
       scanner-mode: dotnet
       build-command: dotnet build MySolution.sln
       pr-number: ${{ github.event.inputs.pr-number }}
+      head-sha: ${{ github.event.inputs.head-sha }}
 ```
 
-That dispatched run resolves the PR number to its *current* head via the
-GitHub API (`scripts/resolve_pr_context.py`), checks out and scans that
-head for real, and posts the named Check Run (`check-name` input) on that
-exact head SHA - so a branch rule requiring that check only goes green
-after a real scan actually ran, not merely because someone clicked a
-button. Unlike the automatic `pull_request` case, a `workflow_dispatch` run
-is NOT subject to GitHub's read-only `GITHUB_TOKEN` downgrade (that
-downgrade is specific to the `pull_request` event from a fork, not to
-`workflow_dispatch` - see
+`head-sha` is not optional in practice, even though the input itself has
+no `required: true` (that would force every `pull_request`-triggered caller
+to also pass it on every ordinary run): dispatching with a PR number alone
+would be a TOCTOU hole - a fork can push a new, unreviewed commit after the
+maintainer's review but before (or while) the dispatched run starts, and
+that new, unreviewed commit is what would actually get built with this
+job's write-scoped tokens, not the one anyone looked at. It could also
+tamper with `.sast-sonarqube/` scripts or the baseline JSON that same job
+later trusts, to green its own check. So before checking out or building
+anything, the dispatched run re-fetches the PR's *live* state from the
+GitHub API (`scripts/resolve_pr_context.py`'s `verify_dispatch_pr_context()`)
+and refuses - with a message naming exactly what changed - unless:
+
+- the PR is still `open` (not closed or merged),
+- its live head SHA still equals `head-sha` exactly, and
+- the API actually returned a head SHA, base SHA, and base ref (an
+  incomplete response is refused rather than trusted).
+
+Only once all three hold does it check out and scan exactly that commit,
+and post the named Check Run (`check-name` input) on that exact head SHA -
+so a branch rule requiring that check only goes green after a real scan of
+reviewed code, not merely because someone clicked a button. Unlike the
+automatic `pull_request` case, a `workflow_dispatch` run is NOT subject to
+GitHub's read-only `GITHUB_TOKEN` downgrade (that downgrade is specific to
+the `pull_request` event from a fork, not to `workflow_dispatch` - see
 [events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)),
 so it also posts the PR comment if `post-pr-comment` is enabled. Dispatching
 a workflow itself needs write access to the repository (see
 [manually running a workflow](https://docs.github.com/en/actions/using-workflows/manually-running-a-workflow)),
 which is exactly the "maintainer" boundary this gate relies on.
+
+**Branch protection must require the right check.** Set the required status
+check to the named Check Run (`check-name`, e.g.
+`sonarqube-community/new-findings-dotnet`) with its source set to the
+**GitHub Actions** app - not "the job" (e.g. `pr-scan-dotnet / pr-scan`).
+Why this distinction matters here specifically: a `pull_request` from a
+fork runs the PR's OWN copy of the caller's workflow file, so its author
+can edit that file to make the JOB itself report green (skip steps, exit 0
+early, whatever) - but that fork PR's read-only `GITHUB_TOKEN` (see above)
+means it can never actually POST the named Check Run, since publishing one
+needs `checks: write`. Requiring the Check Run, not the job, is what makes
+editing the workflow file pointless as a bypass. One more consequence
+worth knowing: the fork PR's own automatic job - the one this gate blocked
+- stays red even AFTER a maintainer successfully dispatches and the Check
+Run goes green; that's expected, not a sign the dispatch didn't work. A
+branch rule that requires the Check Run by name merges the PR once that
+named check is green, regardless of which run (automatic or dispatched)
+posted it.
 
 A private NuGet feed credential, when `build-command` needs one, is wired
 as a `secrets:` input on both reusable workflows - not a plain `with:`
@@ -383,17 +423,33 @@ rather than silently scanning nothing.
 
 `sonar-pr.yml`'s fork-PR gate (and its "Post PR summary comment" step, which
 predates it) read `github.event_name` and `github.event.pull_request.*`
-directly. Inside a workflow invoked via `workflow_call`, these are
-inherited from whatever triggered the overall run (the CALLER's event -
-e.g. `"pull_request"`), never `"workflow_call"` itself. This isn't spelled
-out explicitly in GitHub's own reference docs, but is consistently reported
-in GitHub's own community forum (e.g.
-[Community Discussion #160735](https://github.com/orgs/community/discussions/160735),
-[#174203](https://github.com/orgs/community/discussions/174203)) and is
-what this file already relied on, live, before the fork-PR gate existed.
-What a reusable workflow genuinely can't resolve on a caller's behalf is
-*which runner pool* to use (see the `runner-type` input's own description)
-- that's caller-specific policy, not something event data can answer.
+directly. Inside a workflow invoked via `workflow_call`, these are the
+CALLER's (e.g. `"pull_request"`), never `"workflow_call"` itself - GitHub's
+own docs state it directly: "When a reusable workflow is triggered by a
+caller workflow, the `github` context is always associated with the caller
+workflow" -
+[Reusing workflow configurations](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations).
+This is what this file already relied on, live, before the fork-PR gate
+existed. What a reusable workflow genuinely can't resolve on a caller's
+behalf is *which runner pool* to use (see the `runner-type` input's own
+description) - that's caller-specific policy, not something event data
+can answer.
+
+**`pull_request_target`.** This gate treats `pull_request_target` as an
+alias of `pull_request`, not a separate/unsupported case: GitHub documents
+`pull_request_target` as using the identical `pull_request` webhook payload
+(same `github.event.pull_request` object, same fork/base `repo` fields -
+see [events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)),
+so `resolve_pr_context.py`'s `decide()` runs the exact same fork-detection
+logic for it. Treating it as an alias, not a third case, matters for a
+reason beyond compatibility: callers often choose `pull_request_target`
+specifically to grant a workflow *elevated, base-repo* permissions while
+still scanning a fork's content - exactly the scenario the trust boundary
+exists for, so the gate applies at least as strictly there, not less. We
+considered the simpler "skip the gate for `cli` mode regardless of
+event_name" and rejected it: it would leave `dotnet` mode broken (an
+unsupported-event error) for any `pull_request_target` caller, where the
+alias fixes both modes correctly instead of only papering over `cli`'s.
 
 ### Blocking policy
 

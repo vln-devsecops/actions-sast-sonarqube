@@ -69,16 +69,15 @@ on:
           Value for runs-on. Defaults to ubuntu-latest. Reusable-workflow
           event context note: contrary to what an earlier version of this
           comment claimed, github.event_name/github.event here are NOT
-          always "workflow_call" - they're inherited from whatever
-          triggered the overall run (e.g. "pull_request"), the same as
+          always "workflow_call" - "When a reusable workflow is triggered
+          by a caller workflow, the github context is always associated
+          with the caller workflow" -
+          https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations -
+          so both are the CALLER's (e.g. "pull_request"), the same as
           github.event.pull_request.head.repo.full_name is (the "Post PR
           summary comment" step below, and the fork-PR gate in scanner-mode
-          dotnet, both rely on exactly that). See
-          https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
-          and https://github.com/orgs/community/discussions/160735 - not
-          spelled out explicitly in GitHub's own docs, but consistently
-          reported there and already relied on, live, by this file. What
-          this workflow genuinely can't do is pick a self-hosted runner
+          dotnet, both rely on exactly that, and both predate this comment's
+          correction). What this workflow genuinely can't do is pick a self-hosted runner
           pool on a caller's behalf - that's a caller-specific policy
           (which labels exist, which are "sensitive"), not something to
           infer from event data - so callers that want one still resolve
@@ -143,15 +142,36 @@ on:
         default: false
       pr-number:
         description: >-
-          Only meaningful with github.event_name == workflow_dispatch - the
-          PR number a maintainer is dispatching a scanner-mode: dotnet scan
+          Required (functionally - see resolve_pr_context.py; this input
+          itself stays optional so pull_request-triggered callers are
+          unaffected) with github.event_name == workflow_dispatch - the PR
+          number a maintainer is dispatching a scanner-mode: dotnet scan
           for, on a PR this job otherwise can't run automatically for (a
-          fork PR - see the "Trust boundary" gate below). Wire this from
-          the caller's own workflow_dispatch input - its
-          github.event.inputs.pr-number - via this input's `with:` entry
-          when invoking this workflow (see the README for the exact YAML).
-          Ignored (unused) on a pull_request-triggered run - that event
-          already carries its own PR number.
+          fork PR - see the "Trust boundary" gate below). Always paired
+          with head-sha below - a PR number alone isn't enough, see there
+          for why. Wire this from the caller's own workflow_dispatch input
+          - its github.event.inputs.pr-number - via this input's `with:`
+          entry when invoking this workflow (see the README for the exact
+          YAML). Ignored (unused) on a pull_request-triggered run - that
+          event already carries its own PR number.
+        type: string
+        default: ""
+      head-sha:
+        description: >-
+          Required (functionally, same as pr-number above) alongside
+          pr-number for workflow_dispatch - the full 40-character commit
+          SHA a maintainer actually reviewed before dispatching, copied
+          from the PR's commit list. Re-checked against the PR's LIVE head
+          via the GitHub API (resolve_pr_context.py's
+          verify_dispatch_pr_context()) before anything is checked out or
+          built: a fork can push a new, unreviewed commit after the review
+          but before this run starts (or while it's queued) - without this
+          check, THAT commit is what would actually get built with this
+          job's write-scoped tokens, not the one anyone looked at. A
+          mismatch (or a closed/merged PR, or an API response missing any
+          of head/base SHA or base ref) fails the run with a message naming
+          what changed, asking for a fresh review and dispatch. Ignored
+          (unused) on a pull_request-triggered run.
         type: string
         default: ""
     secrets:
@@ -241,14 +261,29 @@ jobs:
         id: pr-context
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Every value below is an argv entry, not interpolated directly
+          # into the script text - env: is how this file keeps every
+          # ${{ }} out of `run:`'s shell text everywhere else, and this
+          # step is no different, even though every value here happens to
+          # come from a workflow_call input or a trusted github.* context
+          # field today: a future change (or a caller passing something
+          # less trustworthy through one of these inputs) must not need to
+          # remember to do this then.
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PATH: ${{ github.event_path }}
+          SCANNER_MODE: ${{ inputs.scanner-mode }}
+          DISPATCH_PR_NUMBER: ${{ inputs.pr-number }}
+          DISPATCH_HEAD_SHA: ${{ inputs.head-sha }}
+          REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
           python3 .sast-sonarqube/scripts/resolve_pr_context.py \
-            --event-name "${{ github.event_name }}" \
-            --event-file "${{ github.event_path }}" \
-            --scanner-mode "${{ inputs.scanner-mode }}" \
-            --dispatch-pr-number "${{ inputs.pr-number }}" \
-            --repo "${{ github.repository }}" \
+            --event-name "$EVENT_NAME" \
+            --event-file "$EVENT_PATH" \
+            --scanner-mode "$SCANNER_MODE" \
+            --dispatch-pr-number "$DISPATCH_PR_NUMBER" \
+            --dispatch-head-sha "$DISPATCH_HEAD_SHA" \
+            --repo "$REPO" \
             --out pr-context.json
           python_status=$?
           action="$(jq -r '.action // "error"' pr-context.json 2>/dev/null || echo error)"
@@ -297,16 +332,43 @@ jobs:
           exit 1
 
       - name: Checkout PR head
+        # Positive allowlist, not just reliance on "pr-context didn't fail
+        # the job": the pr-context/Gate steps above are already correct on
+        # their own (an "error"/"block" action exits non-zero, and this
+        # step's own default `if: success()` would already skip it), but
+        # this makes the condition for touching PR code explicit and
+        # reviewable in one place rather than an emergent property of every
+        # step's default - a future continue-on-error, or an "error"/"block"
+        # path that stops failing its own step for some other reason, would
+        # otherwise fail OPEN instead of closed.
+        if: contains(fromJSON('["scan","dispatch"]'), steps.pr-context.outputs.action)
         uses: actions/checkout@v7
         with:
           ref: ${{ steps.pr-context.outputs.head-sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Fetch base branch history
+      # actions/checkout above, with fetch-depth: 0, already fetched every
+      # branch into refs/remotes/origin/* ("fetch-depth: Number of commits
+      # to fetch. 0 indicates all history for all branches and tags" -
+      # https://github.com/actions/checkout#readme; confirmed in its source,
+      # getRefSpecForAllHistory() uses refspec
+      # "+refs/heads/*:refs/remotes/origin/*" - every branch, not just the
+      # ref being checked out). A SEPARATE `git fetch origin` step here was
+      # redundant AND broken for private callers: persist-credentials: false
+      # above means this step's own git has no credential to fetch with, so
+      # it would 403/fail outright on a private repo (this repo is public,
+      # so its own CI never caught it). Verify the branch is actually
+      # there instead of re-fetching it.
+      - name: Verify target branch ref is available
+        if: contains(fromJSON('["scan","dispatch"]'), steps.pr-context.outputs.action)
         env:
           BASE_REF: ${{ steps.pr-context.outputs.base-ref }}
-        run: git fetch origin "$BASE_REF"
+        run: |
+          if ! git rev-parse --verify "origin/${BASE_REF}" >/dev/null 2>&1; then
+            echo "::error::origin/${BASE_REF} not found in this checkout. actions/checkout's fetch-depth: 0 should have fetched every branch - check that base-ref/base-sha were resolved correctly and that the base branch still exists."
+            exit 1
+          fi
 
       - name: Resolve merge-base and target HEAD
         id: refs
@@ -513,6 +575,14 @@ jobs:
 
       - name: Scan PR head
         id: head-scan
+        # Same positive allowlist as "Checkout PR head" above - this is the
+        # step that actually executes build-command against whatever was
+        # checked out, so it gets the same explicit, reviewable condition
+        # rather than relying solely on the checkout above having been
+        # skipped (which would leave project-base-dir missing and already
+        # fail action.yml's own check, but that's a side effect, not a
+        # guarantee this step was designed around).
+        if: contains(fromJSON('["scan","dispatch"]'), steps.pr-context.outputs.action)
         uses: ./.sast-sonarqube
         with:
           sonar-host-url: http://localhost:9000

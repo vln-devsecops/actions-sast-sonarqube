@@ -14,7 +14,17 @@ on:
           fork-PR gate - this is the escape hatch for a PR this repo can't
           scan automatically). Leave empty for an ordinary manual run with
           no PR context (pr-scan-dotnet then does nothing; dotnet-e2e and
-          the other jobs below are unaffected either way).
+          the other jobs below are unaffected either way). Always paired
+          with head-sha below.
+        required: false
+        type: string
+      head-sha:
+        description: >-
+          Required alongside pr-number above - the full 40-character
+          commit SHA you actually reviewed on that PR, copied from its
+          commit list. sonar-pr.yml re-checks this against the PR's LIVE
+          head before checking out or building anything, and refuses if a
+          new commit landed since - see sonar-pr.yml's head-sha input.
         required: false
         type: string
 
@@ -287,10 +297,12 @@ jobs:
   # not something to make every external contributor's PR go red by
   # default, so this job's own `if:` below opts it out for them. A
   # maintainer can still dispatch it for a fork PR via this workflow's own
-  # workflow_dispatch pr-number input (see ci.yml's `on:` above).
+  # workflow_dispatch pr-number/head-sha inputs (see ci.yml's `on:` above) -
+  # head-sha is the commit the maintainer actually reviewed; sonar-pr.yml
+  # re-checks it against the PR's live head before doing anything.
   pr-scan-dotnet:
     if: >-
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.pr-number != '') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.pr-number != '' && github.event.inputs.head-sha != '') ||
       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
     needs: unit-tests
     uses: ./.github/workflows/sonar-pr.yml
@@ -307,6 +319,7 @@ jobs:
       dotnet-version: "10.0.x"
       check-name: sonarqube-community/new-findings-dotnet
       pr-number: ${{ github.event.inputs.pr-number }}
+      head-sha: ${{ github.event.inputs.head-sha }}
       # Two builds (fallback baseline + head) plus two scans, on top of the
       # plain CLI path's one - see sonar-pr.yml's timeout-minutes input.
       timeout-minutes: 45
