@@ -5,7 +5,7 @@ from baseline_fallback import BUILD_FAILURE_REASONS, is_build_failure_reason
 
 @pytest.mark.parametrize(
     "reason",
-    ["build-command-failed", "no-analyzable-projects", "project-not-built", "project-not-analyzed", "check-failed"],
+    ["build-command-failed", "no-analyzable-projects", "project-not-built", "project-not-analyzed"],
 )
 def test_build_failure_reasons_are_classified_as_build_failures(reason):
     assert is_build_failure_reason(reason) is True
@@ -26,12 +26,17 @@ def test_build_failure_reasons_are_classified_as_build_failures(reason):
         "invalid-scanner-mode",
         "project-base-dir-missing",
         "scanner-failed",
+        "check-failed",
     ],
 )
 def test_infra_and_config_reasons_are_not_classified_as_build_failures(reason):
     """These must NOT masquerade as "the base didn't build" - doing so
     would hide an unrelated problem (e.g. SonarQube itself being down)
-    behind an empty baseline that looks like a merely permissive choice."""
+    behind an empty baseline that looks like a merely permissive choice.
+    check-failed means check_dotnet_projects.py itself crashed before
+    reaching a verdict - that's a broken CHECK, not evidence about whether
+    the target branch's code builds, so it must fail closed (propagate as
+    a real failure) rather than be read as "nothing to worry about"."""
     assert is_build_failure_reason(reason) is False
 
 
@@ -48,5 +53,4 @@ def test_every_build_failure_reason_is_a_real_run_scan_failure_reason_code():
         "no-analyzable-projects",
         "project-not-built",
         "project-not-analyzed",
-        "check-failed",
     }
