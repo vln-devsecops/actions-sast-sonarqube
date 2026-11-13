@@ -286,6 +286,62 @@ def test_build_scan_properties_scm_disabled_combines_with_sastrc():
     assert props == ["sonar.scm.disabled=true", "sonar.exclusions=vendor/**"]
 
 
+# --- build_scan_properties: sonar-project.properties precedence -------------
+
+
+def test_build_scan_properties_without_project_properties_is_unchanged():
+    sastrc = "exclusions:\n  paths: [\"vendor/**\"]\n"
+    assert build_scan_properties(sastrc, None, project_properties={}) == build_scan_properties(sastrc, None)
+
+
+def test_build_scan_properties_passes_project_properties_through():
+    props = build_scan_properties(
+        None, None, project_properties={"sonar.sources": "src", "sonar.sourceEncoding": "UTF-8"}
+    )
+    assert props == ["sonar.sources=src", "sonar.sourceEncoding=UTF-8"]
+
+
+def test_build_scan_properties_sastrc_wins_over_project_properties_for_same_key():
+    props = build_scan_properties(
+        "exclusions:\n  paths: [\"vendor/**\"]\n",
+        "*.log\n",
+        project_properties={"sonar.exclusions": "other/**", "sonar.sourceEncoding": "UTF-8"},
+    )
+    assert props == ["sonar.sourceEncoding=UTF-8", "sonar.exclusions=vendor/**,**/*.log,**/*.log/**"]
+
+
+def test_build_scan_properties_sastrc_tests_override_project_sources_and_tests():
+    props = build_scan_properties(
+        "tests:\n  paths: [\"tests\"]\n",
+        None,
+        project_properties={"sonar.sources": "src", "sonar.tests": "tests", "sonar.test.inclusions": "x/**"},
+    )
+    assert props == ["sonar.sources=.", "sonar.tests=.", "sonar.test.inclusions=tests/**"]
+
+
+def test_build_scan_properties_emits_each_key_once():
+    props = build_scan_properties(
+        "exclusions:\n  coverage_paths: [\"mocks/**\"]\n",
+        None,
+        project_properties={"sonar.coverage.exclusions": "a/**", "sonar.cpd.exclusions": "b/**"},
+        scm_disabled=True,
+    )
+    keys = [p.split("=", 1)[0] for p in props]
+    assert len(keys) == len(set(keys))
+    assert "sonar.coverage.exclusions=mocks/**" in props
+    assert "sonar.cpd.exclusions=b/**" in props
+
+
+def test_build_scan_properties_refuses_placeholder_in_sastrc_value():
+    with pytest.raises(ValueError, match="placeholder"):
+        build_scan_properties("exclusions:\n  paths: [\"x${env.HOME}/**\"]\n", None)
+
+
+def test_build_scan_properties_refuses_placeholder_in_sastignore_value():
+    with pytest.raises(ValueError, match="placeholder"):
+        build_scan_properties(None, "${env.HOME}\n")
+
+
 # --- parse_sastrc: error messages ------------------------------------------
 
 
@@ -520,3 +576,117 @@ def test_cli_refuses_symlinked_ignore_file_without_echoing_content(project, tmp_
     assert "symbolic link" in proc.stderr
     assert "UNIQUE-CONTENT-MARKER-7f3a" not in proc.stdout + proc.stderr
     assert not out.exists() or b"UNIQUE-CONTENT-MARKER-7f3a" not in out.read_bytes()
+
+
+# --- CLI: sonar-project.properties ------------------------------------------
+
+
+def _run_cli_with_project_properties(tmp_path, project, properties_path=None):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "build_scan_config.py"
+    out = tmp_path / "args.bin"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--config",
+            str(project / ".sastrc"),
+            "--ignore-file",
+            str(project / ".sastignore"),
+            "--project-properties",
+            str(properties_path or project / "sonar-project.properties"),
+            "--project-base-dir",
+            str(project),
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return proc, out
+
+
+def test_cli_passes_allowlisted_project_properties_and_warns_about_the_rest(project, tmp_path):
+    (project / "sonar-project.properties").write_text(
+        "sonar.sources=src\n"
+        "sonar.host.url=http://UNIQUE-VALUE-MARKER-41ab\n"
+        "sonar.scanner.javaExePath=/usr/src/UNIQUE-VALUE-MARKER-41ab\n"
+    )
+    (project / ".sastignore").write_text("*.log\n")
+    proc, out = _run_cli_with_project_properties(tmp_path, project)
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_bytes() == b"-Dsonar.sources=src\0-Dsonar.exclusions=**/*.log,**/*.log/**\0"
+    warnings = [line for line in proc.stdout.splitlines() if line.startswith("::warning")]
+    assert len(warnings) == 1
+    assert "sonar.host.url" in warnings[0]
+    assert "sonar.scanner.javaExePath" in warnings[0]
+    assert "UNIQUE-VALUE-MARKER-41ab" not in proc.stdout + proc.stderr
+
+
+def test_cli_without_project_properties_file_writes_nothing_and_does_not_warn(project, tmp_path):
+    proc, out = _run_cli_with_project_properties(tmp_path, project)
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_bytes() == b""
+    assert "::warning" not in proc.stdout
+
+
+def test_cli_project_properties_with_only_allowlisted_keys_does_not_warn(project, tmp_path):
+    (project / "sonar-project.properties").write_text("sonar.exclusions=vendor/**\n")
+    proc, out = _run_cli_with_project_properties(tmp_path, project)
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_bytes() == b"-Dsonar.exclusions=vendor/**\0"
+    assert "::warning" not in proc.stdout
+
+
+def test_cli_warning_sanitises_dropped_key_names(project, tmp_path):
+    (project / "sonar-project.properties").write_text("evil\\u000a::error::x%0A=1\n")
+    proc, _ = _run_cli_with_project_properties(tmp_path, project)
+    assert proc.returncode == 0, proc.stderr
+    warnings = [line for line in proc.stdout.splitlines() if line.startswith("::")]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("::warning::")
+    assert "::error::" not in warnings[0] and "%" not in warnings[0]
+
+
+def test_cli_refuses_symlinked_project_properties_without_echoing_content(project, tmp_path):
+    outside = tmp_path / "outside.properties"
+    outside.write_text("sonar.sources=UNIQUE-CONTENT-MARKER-7f3a\n")
+    (project / "sonar-project.properties").symlink_to(outside)
+    proc, out = _run_cli_with_project_properties(tmp_path, project)
+    assert proc.returncode != 0
+    assert "symbolic link" in proc.stderr
+    assert "UNIQUE-CONTENT-MARKER-7f3a" not in proc.stdout + proc.stderr
+    assert not out.exists() or b"UNIQUE-CONTENT-MARKER-7f3a" not in out.read_bytes()
+
+
+def test_cli_refuses_project_properties_path_outside_project(project, tmp_path):
+    outside = tmp_path / "outside.properties"
+    outside.write_text("sonar.sources=src\n")
+    proc, _ = _run_cli_with_project_properties(tmp_path, project, properties_path=outside)
+    assert proc.returncode != 0
+    assert "outside the project directory" in proc.stderr
+
+
+def test_cli_refuses_parent_path_in_allowlisted_project_property(project, tmp_path):
+    (project / "sonar-project.properties").write_text("sonar.sources=../UNIQUE-VALUE-MARKER-41ab\n")
+    proc, _ = _run_cli_with_project_properties(tmp_path, project)
+    assert proc.returncode != 0
+    assert "sonar.sources" in proc.stderr
+    assert "UNIQUE-VALUE-MARKER-41ab" not in proc.stdout + proc.stderr
+
+
+def test_cli_reads_project_properties_as_utf8(project, tmp_path):
+    (project / "sonar-project.properties").write_bytes("sonar.exclusions=café/**\n".encode("utf-8"))
+    proc, out = _run_cli_with_project_properties(tmp_path, project)
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_bytes() == "-Dsonar.exclusions=café/**\0".encode("utf-8")
+
+
+def test_cli_replaces_invalid_utf8_like_the_scanner(project, tmp_path):
+    (project / "sonar-project.properties").write_bytes(b"# caf\xe9\nsonar.exclusions=a/**\n")
+    proc, out = _run_cli_with_project_properties(tmp_path, project)
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_bytes() == b"-Dsonar.exclusions=a/**\0"

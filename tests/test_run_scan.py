@@ -19,6 +19,18 @@ if [[ "$1" == "compose" ]]; then
   echo "sonarsource/sonar-scanner-cli:test"
   exit 0
 fi
+# Record what the scanner would find at the forced project.settings path,
+# while the host cache directory still exists.
+for arg in "$@"; do
+  if [[ "$arg" == *:/tmp/sonar-cache ]]; then
+    settings="${arg%:/tmp/sonar-cache}/empty-sonar-project.properties"
+    if [[ -f "$settings" && ! -L "$settings" ]]; then
+      printf 'settings-size=%s\\n' "$(wc -c < "$settings")" >> "$FAKE_DOCKER_LOG.settings"
+    else
+      echo "settings-missing" >> "$FAKE_DOCKER_LOG.settings"
+    fi
+  fi
+done
 # Report a failed scan, so run_scan.sh stops right after `docker run`
 # without polling a server.
 exit 1
@@ -106,9 +118,64 @@ def test_scanner_invocation_is_unchanged_for_a_normal_project(env):
         + r"\w+:/tmp/sonar-cache -w /usr/src sonarsource/sonar-scanner-cli:test "
         r"-Dsonar\.projectKey=test -Dsonar\.projectBaseDir=/usr/src "
         r"-Dsonar\.working\.directory=/usr/src/\.scannerwork "
+        r"-Dproject\.settings=/tmp/sonar-cache/empty-sonar-project\.properties "
         r"-Dsonar\.exclusions=\*\*/\*\.log,\*\*/\*\.log/\*\*"
     )
     assert re.fullmatch(expected, run_calls[0]), run_calls[0]
+
+
+def test_scanner_is_pointed_at_an_empty_settings_file_outside_the_project(env):
+    project = env["workspace"] / "app"
+    project.mkdir()
+    (project / "sonar-project.properties").write_text("sonar.sources=src\n")
+    proc = _run(env, "app", env["workspace"])
+    run_calls = _docker_run_calls(env)
+    assert len(run_calls) == 1, proc.stderr
+    assert "-Dproject.settings=/tmp/sonar-cache/empty-sonar-project.properties" in run_calls[0]
+    settings_log = Path(str(env["log"]) + ".settings")
+    assert settings_log.read_text().split() == ["settings-size=0"]
+    # The consumer's own file is untouched.
+    assert (project / "sonar-project.properties").read_text() == "sonar.sources=src\n"
+
+
+def test_project_settings_is_forced_even_without_a_project_properties_file(env):
+    project = env["workspace"] / "app"
+    project.mkdir()
+    _run(env, "app", env["workspace"])
+    run_calls = _docker_run_calls(env)
+    assert len(run_calls) == 1
+    assert "-Dproject.settings=/tmp/sonar-cache/empty-sonar-project.properties" in run_calls[0]
+
+
+def test_passes_supported_project_properties_and_warns_about_the_rest(env):
+    project = env["workspace"] / "app"
+    project.mkdir()
+    (project / "sonar-project.properties").write_text(
+        "sonar.exclusions=vendor/**\n"
+        "sonar.host.url=http://UNIQUE-VALUE-MARKER-41ab:9111\n"
+        "sonar.scanner.proxyHost=UNIQUE-VALUE-MARKER-41ab\n"
+    )
+    proc = _run(env, "app", env["workspace"])
+    run_calls = _docker_run_calls(env)
+    assert len(run_calls) == 1, proc.stderr
+    assert run_calls[0].endswith(" -Dsonar.exclusions=vendor/**")
+    assert "UNIQUE-VALUE-MARKER-41ab" not in run_calls[0]
+    assert "UNIQUE-VALUE-MARKER-41ab" not in proc.stdout + proc.stderr
+    warnings = [line for line in proc.stdout.splitlines() if line.startswith("::warning::")]
+    assert len(warnings) == 1
+    assert "sonar.host.url" in warnings[0] and "sonar.scanner.proxyHost" in warnings[0]
+
+
+def test_refuses_symlinked_project_properties_before_starting_scanner(env):
+    project = env["workspace"] / "app"
+    project.mkdir()
+    outside = env["tmp"] / "outside.properties"
+    outside.write_text("sonar.sources=UNIQUE-CONTENT-MARKER-7f3a\n")
+    (project / "sonar-project.properties").symlink_to(outside)
+    proc = _run(env, "app", env["workspace"])
+    assert proc.returncode != 0
+    assert "UNIQUE-CONTENT-MARKER-7f3a" not in proc.stdout + proc.stderr
+    assert _docker_run_calls(env) == []
 
 
 def test_mounts_resolved_path_for_symlink_staying_inside_workspace(env):
