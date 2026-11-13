@@ -30,6 +30,10 @@ no way to set sonar.host.url/token/projectKey/projectBaseDir/working.directory
 or any other property through either file: the schema simply has no field
 for them.
 
+Both files are read only as regular files inside project-base-dir: a path
+that resolves outside it, or that is (or passes through) a symbolic link
+below it, fails closed - see read_config_file().
+
 `tests.paths` does NOT map onto sonar.tests directly: sonar.tests only
 accepts a comma-separated list of directories, not globs, and rejects `*`
 fatally - but the whole reason this key exists is to let a caller name
@@ -53,13 +57,19 @@ that shared root are tests:
 With `--scanner-mode dotnet` (run_scan.sh's `scanner-mode: dotnet`), the
 same properties are written as `/d:key=value` tokens for
 `dotnet-sonarscanner begin` instead, and `tests.paths` is rejected rather
-than translated - see build_dotnet_scan_properties().
+than translated - see build_dotnet_scan_properties(). Allowlisted
+`sonar-project.properties` keys are passed on the same way, except
+`sonar.sources`/`sonar.tests`, which the SonarScanner for .NET ignores:
+those are dropped with a warning - see filter_dotnet_project_properties().
 """
 import argparse
 import os
+import stat
 import sys
 
 import yaml
+
+from project_properties import filter_project_properties, format_dropped_keys, parse_properties
 
 ALLOWED_TOP_LEVEL_KEYS = {"exclusions", "tests", "ignore"}
 ALLOWED_EXCLUSIONS_KEYS = {"paths", "coverage_paths", "duplication_paths"}
@@ -97,7 +107,12 @@ def parse_sastrc(text):
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        raise ValueError(f".sastrc is not valid YAML: {e}")
+        # By this point the file has already passed read_config_file()'s
+        # checks (a regular file inside project-base-dir, reached through
+        # no symbolic link), so it's just the repo's own file - PyYAML's
+        # own message, which quotes the offending line, is safe and useful
+        # to include here.
+        raise ValueError(f".sastrc is not valid YAML: {e}") from None
 
     if data is None:
         return result
@@ -204,7 +219,7 @@ def parse_sastignore(text):
     return patterns
 
 
-def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
+def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False, project_properties=None):
     """Combine optional `.sastrc` and `.sastignore` text (either may be None
     or empty) into the final ordered list of `key=value` sonar-scanner
     properties. Returns [] when both are absent/empty and scm_disabled is
@@ -212,7 +227,15 @@ def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
 
     scm_disabled=True adds sonar.scm.disabled=true, for a shallow checkout
     where the SCM sensor would otherwise warn about missing blame data for
-    every file (see run_scan.sh's SCM_DISABLED env var)."""
+    every file (see run_scan.sh's SCM_DISABLED env var).
+
+    project_properties: the already-filtered allowlisted keys from the
+    consumer's sonar-project.properties (see project_properties.py). They
+    come first; any key `.sastrc`/`.sastignore` also sets is taken from
+    those instead, so every key is emitted exactly once.
+
+    Raises ValueError if any value holds a `${...}` placeholder, which the
+    scanner would otherwise expand (including `${env.NAME}`)."""
     sastrc = parse_sastrc(sastrc_text or "")
     ignore_patterns = parse_sastignore(sastignore_text or "")
 
@@ -247,10 +270,19 @@ def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
             props.append(f"sonar.issue.ignore.multicriteria.{criterion_id}.ruleKey={rule}")
             props.append(f"sonar.issue.ignore.multicriteria.{criterion_id}.resourceKey={path}")
 
-    return props
+    sast_keys = {prop.split("=", 1)[0] for prop in props}
+    project_props = [
+        f"{key}={value}" for key, value in (project_properties or {}).items() if key not in sast_keys
+    ]
+    merged = project_props + props
+    for prop in merged:
+        key, value = prop.split("=", 1)
+        if "${" in value:
+            raise ValueError(f"{key} must not contain a ${{...}} placeholder")
+    return merged
 
 
-def build_dotnet_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
+def build_dotnet_scan_properties(sastrc_text, sastignore_text, scm_disabled=False, project_properties=None):
     """Same translation as build_scan_properties(), for `scanner-mode:
     dotnet` (SonarScanner for .NET `begin`), with two differences found
     in the Phase 0 spike (docs/csharp-support-plan.md):
@@ -267,7 +299,12 @@ def build_dotnet_scan_properties(sastrc_text, sastignore_text, scm_disabled=Fals
 
     Everything else (exclusions, cpd/coverage exclusions,
     sonar.issue.ignore.multicriteria.*, sonar.scm.disabled) carries over
-    unchanged; the spike verified each is honoured via `/d:`."""
+    unchanged; the spike verified each is honoured via `/d:`.
+
+    project_properties: allowlisted sonar-project.properties keys, as for
+    build_scan_properties(), already passed through
+    filter_dotnet_project_properties() - a sonar.sources/sonar.tests left
+    in them is a ValueError here, not silently forwarded."""
     sastrc = parse_sastrc(sastrc_text or "")
     if sastrc["tests"]:
         raise ValueError(
@@ -276,7 +313,9 @@ def build_dotnet_scan_properties(sastrc_text, sastignore_text, scm_disabled=Fals
             "from MSBuild (e.g. a test SDK reference or <SonarQubeTestProject>true</SonarQubeTestProject>); "
             "remove tests.paths from .sastrc"
         )
-    props = build_scan_properties(sastrc_text, sastignore_text, scm_disabled=scm_disabled)
+    props = build_scan_properties(
+        sastrc_text, sastignore_text, scm_disabled=scm_disabled, project_properties=project_properties
+    )
     for prop in props:
         key = prop.split("=", 1)[0]
         if key in DOTNET_FORBIDDEN_KEYS:
@@ -304,10 +343,95 @@ def format_scanner_args(props, scanner_mode):
     return [f"{prefix}{prop}" for prop in props]
 
 
+# Allowlisted sonar-project.properties keys (project_properties.py) the
+# SonarScanner for .NET does not support: it ignores both (with a warning)
+# and takes sources/tests from MSBuild instead.
+DOTNET_UNSUPPORTED_PROJECT_KEYS = frozenset({"sonar.sources", "sonar.tests"})
+
+
+def filter_dotnet_project_properties(project_properties):
+    """Split already-allowlisted sonar-project.properties keys into
+    (kept, dropped_keys) for `scanner-mode: dotnet`.
+
+    The SonarScanner for .NET never reads sonar-project.properties itself
+    (verified live against 12.1.0: a multicriteria ignore in the file had
+    no effect), so without this the file would silently apply in cli mode
+    but not in dotnet mode. Every allowlisted key is passed on as `/d:`,
+    except DOTNET_UNSUPPORTED_PROJECT_KEYS: dropping those only ever widens
+    what is analyzed (never hides a finding), so they are dropped with a
+    warning rather than failing the scan - unlike `.sastrc` `tests.paths`,
+    which is this action's own setting and fails closed."""
+    kept = {}
+    dropped = []
+    for key, value in (project_properties or {}).items():
+        if key in DOTNET_UNSUPPORTED_PROJECT_KEYS:
+            dropped.append(key)
+        else:
+            kept[key] = value
+    return kept, dropped
+
+
+def _is_within(path, directory):
+    return os.path.commonpath([path, directory]) == directory
+
+
+def read_config_file(path, project_base_dir, encoding=None, errors=None):
+    """Read an optional config file that must live inside project_base_dir.
+
+    Returns the file's text, or None if it does not exist. Fails closed
+    (raises ValueError, without including any file content) if the path
+    resolves outside project_base_dir, if any component of it below
+    project_base_dir is a symbolic link, or if it is not a regular file.
+    project_base_dir itself may be reached through a symbolic link; only
+    the components below it are checked.
+    """
+    base_abs = os.path.abspath(project_base_dir)
+    base_real = os.path.realpath(project_base_dir)
+    rel = os.path.relpath(os.path.abspath(path), base_abs)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        raise ValueError(f"{path} is outside the project directory {project_base_dir}")
+
+    candidate = base_real
+    if rel != os.curdir:
+        for part in rel.split(os.sep):
+            candidate = os.path.join(candidate, part)
+            if os.path.islink(candidate):
+                raise ValueError(
+                    f"{path} is or is under a symbolic link; config files must be "
+                    "regular files inside the project directory"
+                )
+            if not os.path.lexists(candidate):
+                return None
+
+    if not _is_within(os.path.realpath(candidate), base_real):  # pragma: no cover - defence in depth
+        raise ValueError(f"{path} is outside the project directory {project_base_dir}")
+
+    # O_NOFOLLOW: never follow a link swapped in after the checks above.
+    # O_NONBLOCK: don't hang opening a FIFO before fstat can reject it.
+    fd = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise ValueError(f"{path} is not a regular file")
+    with os.fdopen(fd, "r", encoding=encoding, errors=errors) as f:
+        return f.read()
+
+
 def main():  # pragma: no cover - CLI glue, validated live
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Path to an optional .sastrc file (need not exist)")
     parser.add_argument("--ignore-file", required=True, help="Path to an optional .sastignore file (need not exist)")
+    parser.add_argument(
+        "--project-properties",
+        help=(
+            "Path to an optional sonar-project.properties file (need not exist); only "
+            "allowlisted keys are passed on, the rest are dropped with a warning"
+        ),
+    )
+    parser.add_argument(
+        "--project-base-dir",
+        default=".",
+        help="Directory both config files must be inside (default: current directory)",
+    )
     parser.add_argument(
         "--out",
         required=True,
@@ -326,19 +450,27 @@ def main():  # pragma: no cover - CLI glue, validated live
     )
     args = parser.parse_args()
 
-    sastrc_text = None
-    if os.path.isfile(args.config):
-        with open(args.config) as f:
-            sastrc_text = f.read()
-
-    sastignore_text = None
-    if os.path.isfile(args.ignore_file):
-        with open(args.ignore_file) as f:
-            sastignore_text = f.read()
-
-    build = build_dotnet_scan_properties if args.scanner_mode == "dotnet" else build_scan_properties
     try:
-        props = build(sastrc_text, sastignore_text, scm_disabled=args.scm_disabled)
+        sastrc_text = read_config_file(args.config, args.project_base_dir)
+        sastignore_text = read_config_file(args.ignore_file, args.project_base_dir)
+        project_properties, dropped_keys = {}, []
+        if args.project_properties:
+            # Same decoding as the scanner: UTF-8, malformed bytes replaced.
+            properties_text = read_config_file(
+                args.project_properties, args.project_base_dir, encoding="utf-8", errors="replace"
+            )
+            if properties_text is not None:
+                project_properties, dropped_keys = filter_project_properties(parse_properties(properties_text))
+        dotnet_dropped_keys = []
+        if args.scanner_mode == "dotnet":
+            project_properties, dotnet_dropped_keys = filter_dotnet_project_properties(project_properties)
+        build = build_dotnet_scan_properties if args.scanner_mode == "dotnet" else build_scan_properties
+        props = build(
+            sastrc_text,
+            sastignore_text,
+            scm_disabled=args.scm_disabled,
+            project_properties=project_properties,
+        )
     except ValueError as e:
         raise SystemExit(f"Invalid SAST config: {e}")
 
@@ -351,6 +483,21 @@ def main():  # pragma: no cover - CLI glue, validated live
         print(f"Applied SAST config from {args.config}", file=sys.stderr)
     if sastignore_text is not None:
         print(f"Applied SAST ignore patterns from {args.ignore_file}", file=sys.stderr)
+    if project_properties:
+        print(f"Applied sonar-project.properties keys: {', '.join(project_properties)}", file=sys.stderr)
+    if dropped_keys:
+        # Key names are consumer-supplied text: sanitised before printing,
+        # and values are never printed.
+        print(
+            "::warning::sonar-project.properties keys ignored (not in the supported list): "
+            + format_dropped_keys(dropped_keys)
+        )
+    if dotnet_dropped_keys:
+        print(
+            "::warning::sonar-project.properties keys ignored with scanner-mode: dotnet (the "
+            "SonarScanner for .NET takes sources and tests from MSBuild): "
+            + format_dropped_keys(dotnet_dropped_keys)
+        )
 
 
 if __name__ == "__main__":

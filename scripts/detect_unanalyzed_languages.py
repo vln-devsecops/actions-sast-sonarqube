@@ -58,6 +58,10 @@ consumer's own .gitignore already covers (and git doesn't recurse into a
 nested checkout with its own .git and no submodule record, such as
 .baseline-checkout); PRUNED_DIR_NAMES below is pruned explicitly either
 way, as defense in depth for exactly those two action-specific directories.
+(Since #56 the reusable workflows check the caller's code out into ./src
+with these directories as siblings, so they are no longer under the
+scanned directory there; the pruning stays for direct callers of the
+action that still check out at the workspace root.)
 
 Two more things the git path has to handle itself, since plain
 `git ls-files -co` doesn't: a populated git submodule (`git ls-files`
@@ -74,7 +78,7 @@ import re
 import subprocess
 import sys
 
-from build_scan_config import parse_sastignore, parse_sastrc
+from build_scan_config import parse_sastignore, parse_sastrc, read_config_file
 from check_dotnet_projects import read_compiled_files
 
 # Matches the scanner's fixed-sentence warning generically, so a future
@@ -358,12 +362,31 @@ def detect_unanalyzed_languages(scanner_log_text, base_dir, exclude_patterns=(),
     return sorted(languages)
 
 
+def load_exclude_patterns(config_path, ignore_path, config_base_dir):
+    """Return the exclusion globs from the consumer's optional .sastrc and
+    .sastignore (neither need exist).
+
+    Both are read through build_scan_config.read_config_file, the same
+    reader the scan itself uses, so a config file that is a symbolic link,
+    resolves outside config_base_dir, or is not a regular file fails closed
+    (ValueError) here too, rather than being followed by a plain open().
+    """
+    sastrc = parse_sastrc(read_config_file(config_path, config_base_dir) or "")
+    ignore_patterns = parse_sastignore(read_config_file(ignore_path, config_base_dir) or "")
+    return sastrc["exclusions"] + ignore_patterns
+
+
 def main():  # pragma: no cover - CLI glue over the above, validated live
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scanner-log", required=True, help="Path to the captured scanner stdout/stderr log")
     parser.add_argument("--project-base-dir", required=True, help="Path the scanner ran against")
     parser.add_argument("--config", required=True, help="Path to an optional .sastrc file (need not exist)")
     parser.add_argument("--ignore-file", required=True, help="Path to an optional .sastignore file (need not exist)")
+    parser.add_argument(
+        "--config-base-dir",
+        required=True,
+        help="Directory both config files must be inside (same as build_scan_config.py's --project-base-dir)",
+    )
     parser.add_argument("--out", required=True, help="Path to write the comma-separated language list to (empty file when none)")
     parser.add_argument(
         "--dotnet-sonarqube-out",
@@ -374,23 +397,10 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
     with open(args.scanner_log, encoding="utf-8", errors="replace") as f:
         log_text = f.read()
 
-    sastrc_text = None
-    if os.path.isfile(args.config):
-        with open(args.config) as f:
-            sastrc_text = f.read()
-
-    sastignore_text = None
-    if os.path.isfile(args.ignore_file):
-        with open(args.ignore_file) as f:
-            sastignore_text = f.read()
-
     try:
-        sastrc = parse_sastrc(sastrc_text or "")
-        ignore_patterns = parse_sastignore(sastignore_text or "")
+        exclude_patterns = load_exclude_patterns(args.config, args.ignore_file, args.config_base_dir)
     except ValueError as e:
         raise SystemExit(f"Invalid SAST config: {e}")
-
-    exclude_patterns = sastrc["exclusions"] + ignore_patterns
     compiled_dotnet_files = None
     if args.dotnet_sonarqube_out:
         compiled_dotnet_files = read_compiled_files(args.dotnet_sonarqube_out)
