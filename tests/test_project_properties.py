@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from project_properties import (
@@ -247,6 +250,11 @@ def test_filter_drops_everything_not_allowlisted(key):
         "src/../../x",
         "src\\..\\..\\x",
         "src/..",
+        '"/opt/sonar-scanner"',
+        '".."',
+        'src,"../x"',
+        '"src,/etc"',
+        '"src"',
     ],
 )
 def test_filter_rejects_absolute_and_parent_paths(key, value):
@@ -352,3 +360,19 @@ def test_format_dropped_keys_caps_number_of_names():
     assert message.startswith("k0, k1, ")
     assert "k19" in message and "k20" not in message
     assert message.endswith("(and 30 more)")
+
+
+# --- parse_properties: fixed Java-derived corpus -----------------------------
+
+_CORPUS = json.loads((Path(__file__).parent / "data" / "properties_corpus.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("case", _CORPUS["cases"], ids=lambda c: repr(c["input"])[:40])
+def test_parse_properties_matches_java_reference_corpus(case):
+    # Expected results were produced by java.util.Properties.load over a
+    # UTF-8 reader, with values trimmed, as the pinned scanner reads the file.
+    if case.get("error"):
+        with pytest.raises(ValueError):
+            parse_properties(case["input"])
+    else:
+        assert parse_properties(case["input"]) == case["expected"]

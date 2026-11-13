@@ -1,0 +1,552 @@
+{
+ "source": "java.util.Properties.load (Corretto 21) over a UTF-8 reader, values trimmed",
+ "cases": [
+  {
+   "input": "a=b\n",
+   "expected": {
+    "a": "b"
+   }
+  },
+  {
+   "input": "a:b\n",
+   "expected": {
+    "a": "b"
+   }
+  },
+  {
+   "input": "a b\n",
+   "expected": {
+    "a": "b"
+   }
+  },
+  {
+   "input": "a\tb\n",
+   "expected": {
+    "a": "b"
+   }
+  },
+  {
+   "input": "a\fb\n",
+   "expected": {
+    "a": "b"
+   }
+  },
+  {
+   "input": " a = b \n",
+   "expected": {
+    "a": "b"
+   }
+  },
+  {
+   "input": "a = = b\n",
+   "expected": {
+    "a": "= b"
+   }
+  },
+  {
+   "input": "a  : b\n",
+   "expected": {
+    "a": "b"
+   }
+  },
+  {
+   "input": "a\n",
+   "expected": {
+    "a": ""
+   }
+  },
+  {
+   "input": "a=\n",
+   "expected": {
+    "a": ""
+   }
+  },
+  {
+   "input": "a:\n",
+   "expected": {
+    "a": ""
+   }
+  },
+  {
+   "input": "#c\n!c\na=1\n",
+   "expected": {
+    "a": "1"
+   }
+  },
+  {
+   "input": "# c \\\na=1\n",
+   "expected": {
+    "a": "1"
+   }
+  },
+  {
+   "input": "a=1\\\n  #2\n",
+   "expected": {
+    "a": "1#2"
+   }
+  },
+  {
+   "input": "a=x\\\\\nb=y\n",
+   "expected": {
+    "a": "x\\",
+    "b": "y"
+   }
+  },
+  {
+   "input": "a=x\\\\\\\ny\n",
+   "expected": {
+    "a": "x\\y"
+   }
+  },
+  {
+   "input": "a=x\\\n\nb=y\n",
+   "expected": {
+    "a": "x",
+    "b": "y"
+   }
+  },
+  {
+   "input": "a=x\\",
+   "expected": {
+    "a": "x"
+   }
+  },
+  {
+   "input": "sonar.\\\n  sources=src\n",
+   "expected": {
+    "sonar.sources": "src"
+   }
+  },
+  {
+   "input": "a=x\\ty\\nz\n",
+   "expected": {
+    "a": "x\ty\nz"
+   }
+  },
+  {
+   "input": "sonar.sour\\u0063es=\\u0073rc\n",
+   "expected": {
+    "sonar.sources": "src"
+   }
+  },
+  {
+   "input": "a=\\u00E9\n",
+   "expected": {
+    "a": "\u00e9"
+   }
+  },
+  {
+   "input": "a=\\uD83D\\uDE00\n",
+   "expected": {
+    "a": "\ud83d\ude00"
+   }
+  },
+  {
+   "input": "a\\=b\\:c\\ d=v\n",
+   "expected": {
+    "a=b:c d": "v"
+   }
+  },
+  {
+   "input": "a=\\q\\\\\n",
+   "expected": {
+    "a": "q\\"
+   }
+  },
+  {
+   "input": "a=\\u12\n",
+   "error": true
+  },
+  {
+   "input": "a=\\uZZZZ\n",
+   "error": true
+  },
+  {
+   "input": "\ufeffa=1\n",
+   "expected": {
+    "\ufeffa": "1"
+   }
+  },
+  {
+   "input": "a=1\r\nb=2\r\n",
+   "expected": {
+    "a": "1",
+    "b": "2"
+   }
+  },
+  {
+   "input": "a=1\rb=2\r",
+   "expected": {
+    "a": "1",
+    "b": "2"
+   }
+  },
+  {
+   "input": "a=\\t\\nb\n",
+   "expected": {
+    "a": "b"
+   }
+  },
+  {
+   "input": "a=caf\u00e9\n",
+   "expected": {
+    "a": "caf\u00e9"
+   }
+  },
+  {
+   "input": "  \\\n  a=1\n",
+   "expected": {
+    "a": "1"
+   }
+  },
+  {
+   "input": "a=1\\\r\n  2\n",
+   "expected": {
+    "a": "12"
+   }
+  },
+  {
+   "input": "\\\na=1\n",
+   "expected": {
+    "a": "1"
+   }
+  },
+  {
+   "input": "a\\\n=1\n",
+   "expected": {
+    "a": "1"
+   }
+  },
+  {
+   "input": "a\\ \\\n b=c\n",
+   "expected": {
+    "a b": "c"
+   }
+  },
+  {
+   "input": "\\\n   ",
+   "expected": {}
+  },
+  {
+   "input": "\\\n#x",
+   "expected": {}
+  },
+  {
+   "input": "\\\r\n",
+   "expected": {}
+  },
+  {
+   "input": "\\\n\n",
+   "expected": {}
+  },
+  {
+   "input": "a=1\n\\\n\t\f",
+   "expected": {
+    "a": "1"
+   }
+  },
+  {
+   "input": "\\#a=1\n",
+   "expected": {
+    "#a": "1"
+   }
+  },
+  {
+   "input": "!a\n\\!a=2\n",
+   "expected": {
+    "!a": "2"
+   }
+  },
+  {
+   "input": "a=b\\\\\\\\\\\n c\n",
+   "expected": {
+    "a": "b\\\\c"
+   }
+  },
+  {
+   "input": "=v\n",
+   "expected": {
+    "": "v"
+   }
+  },
+  {
+   "input": ":v\n",
+   "expected": {
+    "": "v"
+   }
+  },
+  {
+   "input": " =v\n",
+   "expected": {
+    "": "v"
+   }
+  },
+  {
+   "input": "0E9:a=b=:!\\aaa!\\u00410E9 =\t:a\u00e9\\u0041\\=x",
+   "expected": {
+    "0E9": "a=b=:!aaa!A0E9 =\t:a\u00e9A=x"
+   }
+  },
+  {
+   "input": "u\ruu\\u0041u",
+   "expected": {
+    "u": "",
+    "uuAu": ""
+   }
+  },
+  {
+   "input": "0E90E9=\f\\u0041# \t#!\ru\\u0041! a\n\r\u00e9ub= \n\t#\t!=\u00e9",
+   "expected": {
+    "0E90E9": "A# \t#!",
+    "uA!": "a",
+    "\u00e9ub": ""
+   }
+  },
+  {
+   "input": "\\ :\na:\\!!\u00e9:\f\r=\n\f=::\\u0041\\0b=",
+   "expected": {
+    "": "::A0b=",
+    " ": "",
+    "a": "!!\u00e9:"
+   }
+  },
+  {
+   "input": "#\n#\\\\\tb:a0E9\r=\u00e90\\u0041:\fu0:\\u0041=u",
+   "expected": {
+    "": "\u00e90A:\fu0:A=u"
+   }
+  },
+  {
+   "input": "0\fx:\n:=0E9\\u0041\u00e9!\nb\fu\f\f",
+   "expected": {
+    "": "=0E9A\u00e9!",
+    "0": "x:",
+    "b": "u"
+   }
+  },
+  {
+   "input": "\t\u00e9!b\t\n0E9x\\x#\\u0041:u\r\u00e9\n\n\fu#:=",
+   "expected": {
+    "0E9xx#A": "u",
+    "u#": "=",
+    "\u00e9": "",
+    "\u00e9!b": ""
+   }
+  },
+  {
+   "input": "\nu\\\nu \u00e9",
+   "expected": {
+    "uu": "\u00e9"
+   }
+  },
+  {
+   "input": " \u00e9b\n\u00e9\t0E90E9=xb\\0\n\\u0041\\u00410E90",
+   "expected": {
+    "AA0E90": "",
+    "\u00e9": "0E90E9=xb0",
+    "\u00e9b": ""
+   }
+  },
+  {
+   "input": "!0\u00e9uau",
+   "expected": {}
+  },
+  {
+   "input": "\t00=\\u0041\nb\\b0#\t:0  x",
+   "expected": {
+    "00": "A",
+    "bb0#": "0  x"
+   }
+  },
+  {
+   "input": "0\n!\t\n\f\\\u00e9a\n\r\\x",
+   "expected": {
+    "0": "",
+    "x": "",
+    "\u00e9a": ""
+   }
+  },
+  {
+   "input": "\\u0041\n \n!\f\\u0041\f\\u0041\u00e9\na0E9x\n!a\r\f:!",
+   "expected": {
+    "": "!",
+    "A": "",
+    "a0E9x": ""
+   }
+  },
+  {
+   "input": "bu=x=au=\f!\\u0041x\n=#\f!\f\r",
+   "expected": {
+    "": "#\f!",
+    "bu": "x=au=\f!Ax"
+   }
+  },
+  {
+   "input": " b!u#=\r\tu#\n\n",
+   "expected": {
+    "b!u#": "",
+    "u#": ""
+   }
+  },
+  {
+   "input": "!u #\\u0041=\t\\!=\\u0041\u00e9",
+   "expected": {}
+  },
+  {
+   "input": "\t\\u0041\f\n# \u00e9#\\x",
+   "expected": {
+    "A": ""
+   }
+  },
+  {
+   "input": "x",
+   "expected": {
+    "x": ""
+   }
+  },
+  {
+   "input": "0E9a\\\u00e90#:\r: :\n0E9:\\\nx00!",
+   "expected": {
+    "": ":",
+    "0E9": "x00!",
+    "0E9a\u00e90#": ""
+   }
+  },
+  {
+   "input": "\\u0041ubu0E9\r\u00e9\f=\r \u00e9 \nx=  #\\\t#\t0 \f!#=\\",
+   "expected": {
+    "Aubu0E9": "",
+    "x": "#\t#\t0 \f!#=",
+    "\u00e9": ""
+   }
+  },
+  {
+   "input": ":",
+   "expected": {
+    "": ""
+   }
+  },
+  {
+   "input": "\\0= \\u0041\t!\f\n\u00e9x\r!!b\tu\r00\\u00410\\=\\\f#\r=",
+   "expected": {
+    "": "",
+    "0": "A\t!",
+    "00A0=\f#": "",
+    "\u00e9x": ""
+   }
+  },
+  {
+   "input": " 0\t\tx!x0E9\f:0\r!0\fb#xb0E9xbxa0#0\t\t",
+   "expected": {
+    "0": "x!x0E9\f:0"
+   }
+  },
+  {
+   "input": "\f\na 0E9!\r00E9\t",
+   "expected": {
+    "00E9": "",
+    "a": "0E9!"
+   }
+  },
+  {
+   "input": "\\u0041\n0:#\r!#=\u00e90!",
+   "expected": {
+    "0": "#",
+    "A": ""
+   }
+  },
+  {
+   "input": "=",
+   "expected": {
+    "": ""
+   }
+  },
+  {
+   "input": "!0b#\r!x",
+   "expected": {}
+  },
+  {
+   "input": "0E9#\f0E9\u00e9b0E9u\\u0041u\tb\r\n\u00e9!\\u0041\f\nb=xa\\u0041\\u0041bu",
+   "expected": {
+    "0E9#": "0E9\u00e9b0E9uAu\tb",
+    "b": "xaAAbu",
+    "\u00e9!A": ""
+   }
+  },
+  {
+   "input": "\u00e9\r\tx\f\\u0041x \f##u=",
+   "expected": {
+    "x": "Ax \f##u=",
+    "\u00e9": ""
+   }
+  },
+  {
+   "input": "\\!0E9\fu\u00e9!\t\n##:a\\u0041\r",
+   "expected": {
+    "!0E9": "u\u00e9!"
+   }
+  },
+  {
+   "input": "\n\u00e9xb\u00e9\u00e90=!=00\n\n\\u0041u\r\ru0\\u0041 b\n \r\f",
+   "expected": {
+    "Au": "",
+    "u0A": "b",
+    "\u00e9xb\u00e9\u00e90": "!=00"
+   }
+  },
+  {
+   "input": "0\u00e9\f\\\n \r\\!\f\r\n=u#  \n0E9x:\n\\:",
+   "expected": {
+    "": "u#",
+    "!": "",
+    "0E9x": "",
+    "0\u00e9": "",
+    ":": ""
+   }
+  },
+  {
+   "input": "\fb:#= 0E9a::=bu\u00e9!",
+   "expected": {
+    "b": "#= 0E9a::=bu\u00e9!"
+   }
+  },
+  {
+   "input": "\n\\:u\ta0uu",
+   "expected": {
+    ":u": "a0uu"
+   }
+  },
+  {
+   "input": "\\u0041:b\n0E90:\\u0041\\u0041u\f#\r\f #0E9\n\n\r\n\f#\u00e9\fx0\f\t",
+   "expected": {
+    "0E90": "AAu\f#",
+    "A": "b"
+   }
+  },
+  {
+   "input": ":\n\r!=\u00e9\\\\u0041\t",
+   "expected": {
+    "": ""
+   }
+  },
+  {
+   "input": "\\u0041!\\u0041!0E9b\\=b\u00e9!a \u00e9\t0E90E9\\u0041b:0\f0E9a",
+   "expected": {
+    "A!A!0E9b=b\u00e9!a": "\u00e9\t0E90E9Ab:0\f0E9a"
+   }
+  },
+  {
+   "input": "\r#b\fa\f\n\u00e9\r:\r",
+   "expected": {
+    "": "",
+    "\u00e9": ""
+   }
+  },
+  {
+   "input": "\r\u00e9a\\ =\\\u00e9b",
+   "expected": {
+    "\u00e9a ": "\u00e9b"
+   }
+  }
+ ]
+}
