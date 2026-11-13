@@ -89,6 +89,11 @@ jobs:
           echo "repo=${repo}" >> "$GITHUB_OUTPUT"
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
+      # Start the checkout from a fresh directory. No trailing slash, so a
+      # symbolic link at this path is removed itself rather than followed.
+      - name: Clear action source directory
+        run: rm -rf -- ./.sast-sonarqube
+
       - name: Checkout this action's source
         uses: actions/checkout@v7
         with:
