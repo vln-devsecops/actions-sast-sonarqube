@@ -89,22 +89,33 @@ jobs:
       pull-requests: write
       actions: read
     steps:
+      # Checked out under a subdirectory, not the workspace root, so this
+      # action's own source and the fallback baseline checkout (both
+      # checked out below, into sibling directories) never share a
+      # directory with the PR's own content - the PR's tree can only ever
+      # reach ./src, never a sibling like .sast-sonarqube or
+      # .baseline-checkout.
       - name: Checkout PR head
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          path: src
           fetch-depth: 0
 
-      # The workspace root holds the PR's own checkout, so this workflow's
-      # intermediate files live in a per-job scratch directory instead.
+      # The workspace root holds no checkout of its own, but this
+      # workflow's intermediate files still live in a per-job scratch
+      # directory rather than anywhere under the workspace.
       - name: Prepare scratch directory
         run: |
           rm -rf -- "${RUNNER_TEMP}/sonar-pr"
           mkdir -p -- "${RUNNER_TEMP}/sonar-pr"
 
+      # git commands below must run inside the caller's own checkout
+      # (./src), not the workspace root.
       - name: Fetch base branch history
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+        working-directory: src
         run: git fetch origin "$BASE_REF"
 
       - name: Resolve merge-base and target HEAD
@@ -113,6 +124,7 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           TARGET_HEAD_SHA: ${{ github.event.pull_request.base.sha }}
           PROJECT_BASE_DIR: ${{ inputs.project-base-dir }}
+        working-directory: src
         run: |
           merge_base="$(git merge-base "origin/${BASE_REF}" HEAD)"
           echo "merge-base=${merge_base}" >> "$GITHUB_OUTPUT"
@@ -136,10 +148,11 @@ jobs:
           cat "${RUNNER_TEMP}/sonar-pr/changed-files.txt"
 
       # This reusable workflow is meant to be called by other repos, so it
-      # can't assume its own composite action (action.yml) is checked out at
-      # the workspace root - that root holds the CALLER's code. Fetch this
-      # action's own repo, pinned to the exact ref this workflow file itself
-      # is running from, into a side directory instead.
+      # can't assume its own composite action (action.yml) is checked out
+      # anywhere useful by default - the caller's own code lives under
+      # ./src (checked out above), so fetch this action's own repo, pinned
+      # to the exact ref this workflow file itself is running from, into a
+      # sibling directory instead.
       - name: Resolve this action's own source ref
         id: action-source
         env:
@@ -156,11 +169,10 @@ jobs:
           echo "repo=${repo}" >> "$GITHUB_OUTPUT"
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
-      # Start the checkout from a fresh directory. No trailing slash, so a
-      # symbolic link at this path is removed itself rather than followed.
-      - name: Clear action source directory
-        run: rm -rf -- ./.sast-sonarqube
-
+      # No removal step first: unlike the PR/baseline checkouts below,
+      # nothing the PR controls can ever land at this sibling path - the
+      # PR's own content is confined to ./src (see "Checkout PR head"
+      # above), so there's nothing here for it to have pre-populated.
       - name: Checkout this action's source
         uses: actions/checkout@v7
         with:
@@ -218,12 +230,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "Baseline resolution: ${tier}"
 
-      # Start the checkout from a fresh directory. No trailing slash, so a
-      # symbolic link at this path is removed itself rather than followed.
-      - name: Clear fallback checkout directory (fallback path only)
-        if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
-        run: rm -rf -- ./.baseline-checkout
-
+      # Another sibling of ./src (see "Checkout PR head" above), for the
+      # same reason: the PR's own content can't reach this path, so - like
+      # the action-source checkout above - no removal step is needed first.
       - name: Checkout target branch HEAD (fallback path only)
         if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
         uses: actions/checkout@v7
@@ -292,7 +301,11 @@ jobs:
           sonar-host-url: http://localhost:9000
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: ${{ inputs.project-key }}
-          project-base-dir: ${{ inputs.project-base-dir }}
+          # project-base-dir is relative to the caller's own repo root; the
+          # caller's checkout itself lives under ./src (see "Checkout PR
+          # head" above), so prefix it here rather than changing what the
+          # input means to callers.
+          project-base-dir: src/${{ inputs.project-base-dir }}
           sast-config-path: ${{ inputs.sast-config-path }}
           sast-ignore-path: ${{ inputs.sast-ignore-path }}
 

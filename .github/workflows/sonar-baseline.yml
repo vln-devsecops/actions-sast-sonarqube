@@ -65,14 +65,20 @@ jobs:
     permissions:
       contents: read
     steps:
+      # Checked out under a subdirectory, not the workspace root, so this
+      # action's own source (checked out below, into a sibling directory)
+      # never shares a directory with the pushed branch's own content.
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          path: src
 
       # This reusable workflow is meant to be called by other repos, so it
-      # can't assume its own composite action (action.yml) is checked out at
-      # the workspace root - that root holds the CALLER's code. Fetch this
-      # action's own repo, pinned to the exact ref this workflow file itself
-      # is running from, into a side directory instead.
+      # can't assume its own composite action (action.yml) is checked out
+      # anywhere useful by default - the caller's own code lives under
+      # ./src (checked out above), so fetch this action's own repo, pinned
+      # to the exact ref this workflow file itself is running from, into a
+      # sibling directory instead.
       - name: Resolve this action's own source ref
         id: action-source
         env:
@@ -89,11 +95,10 @@ jobs:
           echo "repo=${repo}" >> "$GITHUB_OUTPUT"
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
-      # Start the checkout from a fresh directory. No trailing slash, so a
-      # symbolic link at this path is removed itself rather than followed.
-      - name: Clear action source directory
-        run: rm -rf -- ./.sast-sonarqube
-
+      # No removal step first: nothing the pushed branch controls can ever
+      # land at this sibling path - its content is confined to ./src (see
+      # "Checkout" above), so there's nothing here for it to have
+      # pre-populated.
       - name: Checkout this action's source
         uses: actions/checkout@v7
         with:
@@ -124,7 +129,11 @@ jobs:
           sonar-host-url: http://localhost:9000
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: ${{ inputs.project-key }}
-          project-base-dir: ${{ inputs.project-base-dir }}
+          # project-base-dir is relative to the caller's own repo root; the
+          # caller's checkout itself lives under ./src (see "Checkout"
+          # above), so prefix it here rather than changing what the input
+          # means to callers.
+          project-base-dir: src/${{ inputs.project-base-dir }}
           sast-config-path: ${{ inputs.sast-config-path }}
           sast-ignore-path: ${{ inputs.sast-ignore-path }}
 
