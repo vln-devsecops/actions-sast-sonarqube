@@ -73,6 +73,7 @@ trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}"' EXIT
 build_scan_config_args=(
   --config "$SAST_CONFIG_FILE"
   --ignore-file "$SAST_IGNORE_FILE"
+  --project-base-dir "$PROJECT_BASE_DIR"
   --out "$EXTRA_ARGS_FILE"
 )
 if [[ "${SCM_DISABLED:-false}" == "true" ]]; then
