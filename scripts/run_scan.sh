@@ -28,7 +28,23 @@ if [[ ! -d "$PROJECT_BASE_DIR" ]]; then
   echo "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' does not exist or is not a directory." >&2
   exit 1
 fi
-ABS_PROJECT_BASE_DIR="$(cd "$PROJECT_BASE_DIR" && pwd)"
+# Resolve to the physical path (pwd -P), so what gets bind-mounted below is
+# exactly the directory that was checked, not a symbolic link to it.
+ABS_PROJECT_BASE_DIR="$(cd "$PROJECT_BASE_DIR" && pwd -P)"
+
+# Under GitHub Actions, the directory to scan must be inside the workspace.
+# Outside Actions (e.g. a manual local run) there is no workspace to
+# confine to, so this check is skipped.
+if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
+  if ! ABS_WORKSPACE="$(cd "$GITHUB_WORKSPACE" && pwd -P)"; then
+    echo "GITHUB_WORKSPACE '${GITHUB_WORKSPACE}' is not an accessible directory." >&2
+    exit 1
+  fi
+  if [[ "$ABS_PROJECT_BASE_DIR" != "$ABS_WORKSPACE" && "$ABS_PROJECT_BASE_DIR" != "$ABS_WORKSPACE"/* ]]; then
+    echo "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' resolves to '${ABS_PROJECT_BASE_DIR}', outside GITHUB_WORKSPACE '${ABS_WORKSPACE}'." >&2
+    exit 1
+  fi
+fi
 
 # Single source of truth for the sonar-scanner-cli version is the inert
 # `scanner` profile service in docker-compose.ephemeral.yml, so Dependabot
