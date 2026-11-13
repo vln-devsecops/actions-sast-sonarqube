@@ -289,18 +289,22 @@ def test_build_scan_properties_scm_disabled_combines_with_sastrc():
 # --- parse_sastrc: error messages ------------------------------------------
 
 
-def test_parse_sastrc_yaml_error_reports_position_without_file_content():
+def test_parse_sastrc_yaml_error_includes_offending_content():
+    # .sastrc has already passed read_config_file()'s checks by the time it
+    # reaches parse_sastrc (regular file, inside project-base-dir, no
+    # symlink) - at that point it's just the repo's own file, and PyYAML's
+    # own message (which quotes the offending line) is useful enough to be
+    # worth including, as it was before path validation was added.
     marker = "UNIQUE-CONTENT-MARKER-7f3a"
     text = f"exclusions:\n  paths: [{marker}\n  other: {marker}: :\n"
     with pytest.raises(ValueError) as excinfo:
         parse_sastrc(text)
     message = str(excinfo.value)
     assert "not valid YAML" in message
-    assert "line" in message and "column" in message
-    assert marker not in message
+    assert marker in message
 
 
-def test_parse_sastrc_yaml_error_without_position_still_reports_cleanly(monkeypatch):
+def test_parse_sastrc_yaml_error_includes_underlying_message_without_position(monkeypatch):
     import build_scan_config
 
     def _raise(_text):
@@ -309,8 +313,9 @@ def test_parse_sastrc_yaml_error_without_position_still_reports_cleanly(monkeypa
     monkeypatch.setattr(build_scan_config.yaml, "safe_load", _raise)
     with pytest.raises(ValueError) as excinfo:
         parse_sastrc("exclusions: {}\n")
-    assert "not valid YAML" in str(excinfo.value)
-    assert "UNIQUE-CONTENT-MARKER-7f3a" not in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "not valid YAML" in message
+    assert "UNIQUE-CONTENT-MARKER-7f3a" in message
 
 
 # --- read_config_file: path validation ---------------------------------------
