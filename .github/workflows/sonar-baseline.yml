@@ -68,6 +68,15 @@ jobs:
       # Checked out under a subdirectory, not the workspace root, so this
       # action's own source (checked out below, into a sibling directory)
       # never shares a directory with the pushed branch's own content.
+      #
+      # Clear the path first - independent of what an earlier job on the
+      # same (possibly persistent, self-hosted) runner left there, not just
+      # this job's own checkout below. This forces a fresh clone every run
+      # rather than an incremental one on a persistent runner; acceptable
+      # for the hardening it buys.
+      - name: Clear caller checkout directory
+        run: rm -rf -- ./src
+
       - name: Checkout
         uses: actions/checkout@v7
         with:
@@ -95,10 +104,13 @@ jobs:
           echo "repo=${repo}" >> "$GITHUB_OUTPUT"
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
-      # No removal step first: nothing the pushed branch controls can ever
-      # land at this sibling path - its content is confined to ./src (see
-      # "Checkout" above), so there's nothing here for it to have
-      # pre-populated.
+      # Clear this fixed path before use too, same as ./src above: a prior
+      # job on the same runner may have left it behind as a symlink, no
+      # trailing slash so a symlink at this path is removed itself rather
+      # than followed.
+      - name: Clear action source directory
+        run: rm -rf -- ./.sast-sonarqube
+
       - name: Checkout this action's source
         uses: actions/checkout@v7
         with:

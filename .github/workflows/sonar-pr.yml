@@ -92,9 +92,16 @@ jobs:
       # Checked out under a subdirectory, not the workspace root, so this
       # action's own source and the fallback baseline checkout (both
       # checked out below, into sibling directories) never share a
-      # directory with the PR's own content - the PR's tree can only ever
-      # reach ./src, never a sibling like .sast-sonarqube or
-      # .baseline-checkout.
+      # directory with the PR's own content.
+      #
+      # Clear the path first - independent of what an earlier job on the
+      # same (possibly persistent, self-hosted) runner left there, not just
+      # this job's own checkout below. This forces a fresh clone every run
+      # rather than an incremental one on a persistent runner; acceptable
+      # for the hardening it buys.
+      - name: Clear caller checkout directory
+        run: rm -rf -- ./src
+
       - name: Checkout PR head
         uses: actions/checkout@v7
         with:
@@ -169,10 +176,13 @@ jobs:
           echo "repo=${repo}" >> "$GITHUB_OUTPUT"
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
-      # No removal step first: unlike the PR/baseline checkouts below,
-      # nothing the PR controls can ever land at this sibling path - the
-      # PR's own content is confined to ./src (see "Checkout PR head"
-      # above), so there's nothing here for it to have pre-populated.
+      # Clear this fixed path before use too, same as ./src above: a prior
+      # job on the same runner may have left it behind as a symlink, no
+      # trailing slash so a symlink at this path is removed itself rather
+      # than followed.
+      - name: Clear action source directory
+        run: rm -rf -- ./.sast-sonarqube
+
       - name: Checkout this action's source
         uses: actions/checkout@v7
         with:
@@ -230,9 +240,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "Baseline resolution: ${tier}"
 
-      # Another sibling of ./src (see "Checkout PR head" above), for the
-      # same reason: the PR's own content can't reach this path, so - like
-      # the action-source checkout above - no removal step is needed first.
+      # Start the checkout from a fresh directory. No trailing slash, so a
+      # symbolic link at this path is removed itself rather than followed.
+      - name: Clear fallback checkout directory (fallback path only)
+        if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
+        run: rm -rf -- ./.baseline-checkout
+
       - name: Checkout target branch HEAD (fallback path only)
         if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
         uses: actions/checkout@v7
