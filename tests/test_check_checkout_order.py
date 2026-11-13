@@ -6,6 +6,7 @@ import yaml
 from check_checkout_order import (
     find_checkout_order_violations,
     find_mismatched_recheckout_conditions,
+    find_unprotected_subdirectory_checkouts,
     find_workspace_write_violations,
 )
 
@@ -293,6 +294,108 @@ def test_another_checkout_between_breaks_the_pairing():
     assert find_mismatched_recheckout_conditions(steps) == []
 
 
+# --- find_unprotected_subdirectory_checkouts() ----------------------------------
+#
+# The risk this guards against only exists once a PR's own tree can
+# actually be on disk - i.e. after some ROOT checkout has already run in
+# this job (see the module docstring on find_checkout_order_violations).
+# Every fixture below that means to represent "the risk window is open"
+# starts with a root checkout() accordingly.
+
+def test_unprotected_subdirectory_checkout_is_flagged():
+    """The .baseline-checkout class of bug: once a root checkout has run
+    (bringing a PR's tree onto disk), a later checkout into a named
+    subdirectory with no preceding removal of that exact path - a PR
+    that pre-committed a symlink there gets followed and emptied."""
+    steps = [checkout(None), {**checkout(".baseline-checkout"), "name": "checkout"}]
+    assert find_unprotected_subdirectory_checkouts(steps) == ["checkout"]
+
+
+def test_subdirectory_checkout_before_any_root_checkout_is_not_flagged():
+    """The real workflow's own "Checkout this action's source" - the
+    very first checkout in the job, before "Checkout PR head" ever runs -
+    needs no removal first: nothing PR-controlled can be on disk yet."""
+    steps = [{**checkout(".baseline-checkout"), "name": "checkout"}]
+    assert find_unprotected_subdirectory_checkouts(steps) == []
+
+
+def test_subdirectory_checkout_preceded_by_its_own_removal_is_protected():
+    steps = [
+        checkout(None),
+        {"name": "remove", "run": "rm -rf -- ./.baseline-checkout"},
+        {**checkout(".baseline-checkout"), "name": "checkout"},
+    ]
+    assert find_unprotected_subdirectory_checkouts(steps) == []
+
+
+def test_removal_far_earlier_still_protects_a_later_checkout():
+    """"Preceded by", not "immediately preceded by" - nothing recreates a
+    symlink at that name once removed, so the gap between removal and
+    checkout doesn't matter the way it does for the root-checkout/
+    re-checkout if: pairing."""
+    steps = [
+        checkout(None),
+        {"name": "remove", "run": "rm -rf -- ./.baseline-checkout"},
+        run_step("unrelated step"),
+        run_step("another unrelated step"),
+        {**checkout(".baseline-checkout"), "name": "checkout"},
+    ]
+    assert find_unprotected_subdirectory_checkouts(steps) == []
+
+
+def test_action_source_checkout_is_already_protected_by_its_existing_removal():
+    """Generalizing this check must not re-flag the .sast-sonarqube
+    re-checkout, which already has its own removal step (an earlier
+    fix) - nor the FIRST .sast-sonarqube checkout, which comes before any
+    root checkout."""
+    steps = [
+        checkout(".sast-sonarqube"),
+        checkout(None),
+        {"name": "remove", "run": "rm -rf -- ./.sast-sonarqube"},
+        {**checkout(".sast-sonarqube"), "name": "recheckout"},
+    ]
+    assert find_unprotected_subdirectory_checkouts(steps) == []
+
+
+def test_root_checkout_is_never_flagged_as_unprotected():
+    """A root checkout isn't "a fixed workspace subdirectory" - it's a
+    different, already-covered risk (find_checkout_order_violations)."""
+    steps = [checkout(None), checkout(None)]
+    assert find_unprotected_subdirectory_checkouts(steps) == []
+
+
+def test_removal_of_a_different_path_does_not_protect_this_one():
+    steps = [
+        checkout(None),
+        {"name": "remove other", "run": "rm -rf -- ./.sast-sonarqube"},
+        {**checkout(".baseline-checkout"), "name": "checkout"},
+    ]
+    assert find_unprotected_subdirectory_checkouts(steps) == ["checkout"]
+
+
+def test_one_removal_line_can_protect_multiple_paths():
+    steps = [
+        checkout(None),
+        {"name": "remove both", "run": "rm -rf -- ./.sast-sonarqube ./.baseline-checkout"},
+        {**checkout(".sast-sonarqube"), "name": "a"},
+        {**checkout(".baseline-checkout"), "name": "b"},
+    ]
+    assert find_unprotected_subdirectory_checkouts(steps) == []
+
+
+def test_sonar_pr_yml_pr_scan_job_has_no_unprotected_subdirectory_checkouts():
+    """The real-file regression test for this round's .baseline-checkout fix."""
+    steps = _load_job_steps(".github/workflows/sonar-pr.yml", "pr-scan")
+    assert find_unprotected_subdirectory_checkouts(steps) == []
+
+
+def test_non_string_run_value_does_not_count_as_a_removal():
+    """Defensive: `run:` is always a string in valid workflow YAML, but a
+    malformed/non-string value must not crash this check."""
+    steps = [checkout(None), {"name": "odd", "run": None}, {**checkout(".baseline-checkout"), "name": "checkout"}]
+    assert find_unprotected_subdirectory_checkouts(steps) == ["checkout"]
+
+
 # --- find_workspace_write_violations() ------------------------------------------
 
 def test_redirect_to_a_bare_relative_path_is_a_violation():
@@ -368,6 +471,97 @@ def test_braced_variable_reference_resolves_too():
     assert find_workspace_write_violations(steps) == []
 
 
+def test_tee_to_a_bare_relative_path_is_a_violation():
+    steps = [{"name": "write", "run": "echo hi | tee changed-files.txt"}]
+    assert find_workspace_write_violations(steps) == [("write", "changed-files.txt")]
+
+
+def test_tee_dash_a_to_a_bare_relative_path_is_a_violation():
+    steps = [{"name": "write", "run": "echo hi | tee -a changed-files.txt"}]
+    assert find_workspace_write_violations(steps) == [("write", "changed-files.txt")]
+
+
+def test_tee_to_a_safe_target_is_not_flagged():
+    """The real pattern in "Apply blocking policy": `| tee -a "$GITHUB_STEP_SUMMARY"`."""
+    steps = [{"name": "write", "run": '{ echo hi; } | tee -a "$GITHUB_STEP_SUMMARY"'}]
+    assert find_workspace_write_violations(steps) == []
+
+
+def test_tee_multiple_targets_all_checked():
+    steps = [{"name": "write", "run": "echo hi | tee one.txt two.txt"}]
+    violations = find_workspace_write_violations(steps)
+    assert sorted(violations) == [("write", "one.txt"), ("write", "two.txt")]
+
+
+def test_cp_last_argument_to_a_bare_relative_path_is_a_violation():
+    steps = [{"name": "write", "run": "cp source.json dest.json"}]
+    assert find_workspace_write_violations(steps) == [("write", "dest.json")]
+
+
+def test_cp_source_argument_itself_is_not_flagged():
+    """Only the LAST (destination) argument is a write target - the
+    source is read, not written."""
+    steps = [{"name": "write", "run": 'cp "$RUNNER_TEMP/source.json" dest.json'}]
+    assert find_workspace_write_violations(steps) == [("write", "dest.json")]
+
+
+def test_mv_last_argument_to_a_bare_relative_path_is_a_violation():
+    steps = [{"name": "write", "run": "mv source.json dest.json"}]
+    assert find_workspace_write_violations(steps) == [("write", "dest.json")]
+
+
+def test_cp_with_flags_still_finds_the_last_argument():
+    steps = [{"name": "write", "run": "cp -r source dest.json"}]
+    assert find_workspace_write_violations(steps) == [("write", "dest.json")]
+
+
+def test_cp_mv_to_a_safe_target_is_not_flagged():
+    steps = [{"name": "write", "run": 'cp source.json "$RUNNER_TEMP/dest.json"'}]
+    assert find_workspace_write_violations(steps) == []
+
+
+def test_clobber_redirect_to_a_bare_relative_path_is_a_violation():
+    steps = [{"name": "write", "run": "echo hi >| changed-files.txt"}]
+    assert find_workspace_write_violations(steps) == [("write", "changed-files.txt")]
+
+
+def test_clobber_redirect_to_a_safe_target_is_not_flagged():
+    steps = [{"name": "write", "run": 'echo hi >| "$RUNNER_TEMP/changed-files.txt"'}]
+    assert find_workspace_write_violations(steps) == []
+
+
+def test_out_equals_form_to_a_bare_relative_path_is_a_violation():
+    steps = [{"name": "write", "run": "python3 foo.py --out=new-findings.json"}]
+    assert find_workspace_write_violations(steps) == [("write", "new-findings.json")]
+
+
+@pytest.mark.parametrize("run_text", ["python3 foo.py --output report.json", "python3 foo.py --output=report.json"])
+def test_output_flag_to_a_bare_relative_path_is_a_violation(run_text):
+    steps = [{"name": "write", "run": run_text}]
+    assert find_workspace_write_violations(steps) == [("write", "report.json")]
+
+
+@pytest.mark.parametrize("run_text", ["python3 foo.py -o report.json", "python3 foo.py -o=report.json"])
+def test_short_o_flag_to_a_bare_relative_path_is_a_violation(run_text):
+    steps = [{"name": "write", "run": run_text}]
+    assert find_workspace_write_violations(steps) == [("write", "report.json")]
+
+
+def test_short_o_flag_to_a_safe_target_is_not_flagged():
+    steps = [{"name": "write", "run": 'python3 foo.py -o "$RUNNER_TEMP/report.json"'}]
+    assert find_workspace_write_violations(steps) == []
+
+
+@pytest.mark.parametrize("run_text", ["set -o pipefail", "set -euo pipefail", "set -uo pipefail"])
+def test_set_dash_o_shell_option_is_not_mistaken_for_a_write_flag(run_text):
+    """`set -o pipefail` (and combined short forms like `-euo`) is a shell
+    builtin turning on an option, not a write to a file named "pipefail" -
+    this is the exact pattern several steps in this repo's own workflows
+    already use."""
+    steps = [{"name": "write", "run": run_text}]
+    assert find_workspace_write_violations(steps) == []
+
+
 def test_arithmetic_comparison_is_not_mistaken_for_a_redirect():
     """`(( count > 1 ))` matches the same ">" shape a redirect would - a
     bare numeric target is never a real intermediate file in this
@@ -377,10 +571,10 @@ def test_arithmetic_comparison_is_not_mistaken_for_a_redirect():
 
 
 def test_stderr_fd_duplication_is_not_mistaken_for_a_write_target():
-    steps = [{"name": "write", "run": "some-command 2>&1 | tee out.log"}]
-    # 2>&1 must not be misread as redirecting to a bare file named "&1" -
-    # and "tee out.log" is a positional arg, not a `>`/`--out` redirect, so
-    # it's intentionally not inspected here at all.
+    """2>&1 must not be misread as redirecting to a bare file named "&1"
+    - using a safe tee target isolates that from tee's own target now
+    also being checked (see the dedicated tee tests above)."""
+    steps = [{"name": "write", "run": 'some-command 2>&1 | tee "$RUNNER_TEMP/out.log"'}]
     assert find_workspace_write_violations(steps) == []
 
 
