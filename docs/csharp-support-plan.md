@@ -206,6 +206,9 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 
 - Pre-existing: `action.yml`'s fetch and report steps interpolate `${{ inputs.* }}` (project-key, sonar-host-url, and the token on `fetch_findings.py`'s argv) directly inside `run:`. Move them to `env:`. Found in the Phase 2-3 review; present since before this plan; separate `fix(action):` PR.
 
+- Separate hardening PRs found during this work, each its own changelog entry (not part of the C# PRs): #55 config-path hardening, #57 scanner settings allowlist, #56 checkout layout (action source outside the scanned project). Merge order #55 -> #57 -> #56, released together as v1.2.2, then reconcile #52 -> #53 -> #54 onto it (dropping #54's re-checkout step, which #56's layout makes unnecessary).
+- Queued after #56 merges, as its own PR from `dev`: scanner container hardening - read-only project mount with the working directory in the cache mount, `persist-credentials: false` on the remaining checkouts, and the scanner on the compose network instead of the host network.
+
 ## Risks
 
 - Build failures masquerading as "no findings". Mitigate: fail the action if `build-command` or `end` fails, or if zero C# files were analyzed; test that explicitly.
@@ -232,3 +235,4 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - 2026-11-12 - Phases 2-3 PR #53 opened (stacked on #52) after three independent review rounds; also fixed: per-file `SonarQubeExclude` counted as compiled (via the analyzer's `file-metadata.pb`, fails safe), distinct `check-failed` / `scanner-failed` reasons. GitHub CI `dotnet-e2e` green: pinned rules found, every bad case failed with its expected `failure-reason`, excluded project passed, stray C# reported. Note: on the self-hosted runner, run pytest with `--basetemp` under `$HOME` (`/tmp` is noexec).
 - 2026-11-12 - guidance#35 and devsecops.vlinder.ca#136 merged: the false C# claim is corrected everywhere it was published.
 - 2026-11-12 - Phase 4 PR #54 opened (stacked on #53) after three independent review rounds that fixed: dispatch TOCTOU (dispatch now requires the reviewed `head-sha`, re-checked live before checkout), `persist-credentials: false` breaking `git fetch` for private cli callers (fetch removed; `fetch-depth: 0` already fetches all branches), the PR checkout wiping the trusted `.sast-sonarqube` and letting a PR supply its own (re-checkout + structural order test), and `pull_request_target` (now rejected in every mode - a fork's `.sastignore` could otherwise get a green required check with the base repo's token). CI on #54 green, including `pr-scan-dotnet` (first real same-repo dotnet run through the reusable workflow). Symlink hardening (pre-existing) being added to #54.
+- 2026-11-13 - Hardening found during review split into separate PRs (#55, #56, #57) per rlc, so each appears in the changelog; container-hardening follow-up queued after #56. C# stack to be reconciled onto v1.2.2.
