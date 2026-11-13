@@ -124,7 +124,8 @@ C++, Objective-C, or Swift (so it never even indexes or logs about them;
 `scripts/detect_unanalyzed_languages.py` instead looks for `.c`, `.cc`,
 `.cpp`, `.cxx`, `.c++`, `.m`, `.mm`, and `.swift` files under
 `project-base-dir`, honoring `.sastrc` `exclusions.paths` and
-`.sastignore`). A repo in one of these languages would otherwise get a
+`.sastignore`, read with the same regular-file-inside-`project-base-dir`
+checks as the scan itself). A repo in one of these languages would otherwise get a
 scan that looks clean - zero findings - while actually saying nothing
 about those files at all.
 
@@ -298,6 +299,38 @@ unrecognized key exits non-zero with a clear error before the scan runs,
 rather than silently doing nothing. There is deliberately no way to set
 `sonar.host.url`, `sonar.token`, `sonar.projectKey`, `sonar.projectBaseDir`,
 or `sonar.working.directory` through either file.
+
+Both files must be regular files inside `project-base-dir`. A path that
+resolves outside it, or that is (or passes through) a symbolic link below
+it, also fails the job closed - commit the file itself rather than a link
+to it.
+
+## `sonar-project.properties`
+
+The scanner is not given the project's `sonar-project.properties`
+directly. Instead, the action reads `project-base-dir/sonar-project.properties`
+(if present; same regular-file / no-symlink rules as above) and passes on
+only these keys:
+
+| Key | Why it is honoured |
+| --- | --- |
+| `sonar.sources`, `sonar.tests` | which directories hold code and tests |
+| `sonar.inclusions`, `sonar.exclusions` | narrow the analysed file set |
+| `sonar.test.inclusions`, `sonar.test.exclusions` | narrow the test file set |
+| `sonar.coverage.exclusions`, `sonar.cpd.exclusions` | leave files out of coverage / duplication |
+| `sonar.sourceEncoding` | how source files are decoded |
+| `sonar.python.version`, `sonar.java.source` | which language level the rules assume |
+
+Every other key (server, credential, scanner runtime, proxy, cache,
+plugin, module and analyzer-runtime settings included) is ignored, and the
+job logs a warning listing the ignored key names. Path-valued keys must
+stay inside the project (no absolute paths, no `..`, no double quotes), no value may contain
+a `${...}` placeholder, and an invalid value for a supported key fails the
+job closed. `.sastrc`/`.sastignore` take precedence over
+`sonar-project.properties` for the same key, and the action's own
+`sonar.projectKey`/`sonar.projectBaseDir`/`sonar.working.directory` cannot
+be set from either. `sonar.modules` (multi-module layouts) is not
+supported.
 
 ## Testing
 

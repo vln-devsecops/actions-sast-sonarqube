@@ -6,6 +6,7 @@ import pytest
 from detect_unanalyzed_languages import (
     detect_extension_languages,
     detect_unanalyzed_languages,
+    load_exclude_patterns,
     parse_scanner_log,
 )
 
@@ -530,3 +531,61 @@ def test_detect_unanalyzed_languages_respects_exclusion_patterns(tmp_path):
     _touch(tmp_path / "vendor" / "lib.cpp")
     result = detect_unanalyzed_languages("", tmp_path, exclude_patterns=["**/vendor/**"])
     assert result == []
+
+
+# --- load_exclude_patterns: .sastrc/.sastignore read through the same
+# safe reader as build_scan_config.py (read_config_file), not a plain open ---
+
+
+def test_load_exclude_patterns_neither_file_present_is_empty(tmp_path):
+    assert load_exclude_patterns(str(tmp_path / ".sastrc"), str(tmp_path / ".sastignore"), str(tmp_path)) == []
+
+
+def test_load_exclude_patterns_merges_sastrc_and_sastignore(tmp_path):
+    (tmp_path / ".sastrc").write_text("exclusions:\n  paths:\n    - vendor/**\n")
+    (tmp_path / ".sastignore").write_text("build/\n")
+    patterns = load_exclude_patterns(str(tmp_path / ".sastrc"), str(tmp_path / ".sastignore"), str(tmp_path))
+    assert "vendor/**" in patterns
+    assert "**/build/**" in patterns
+
+
+def test_load_exclude_patterns_rejects_symlinked_sastrc(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text("exclusions:\n  paths:\n    - '**'\n")
+    project = tmp_path / "project"
+    project.mkdir()
+    os.symlink(outside / "secret", project / ".sastrc")
+    with pytest.raises(ValueError, match="symbolic link"):
+        load_exclude_patterns(str(project / ".sastrc"), str(project / ".sastignore"), str(project))
+
+
+def test_load_exclude_patterns_rejects_symlinked_sastignore(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "ignore").write_text("**\n")
+    project = tmp_path / "project"
+    project.mkdir()
+    os.symlink(outside / "ignore", project / ".sastignore")
+    with pytest.raises(ValueError, match="symbolic link"):
+        load_exclude_patterns(str(project / ".sastrc"), str(project / ".sastignore"), str(project))
+
+
+def test_load_exclude_patterns_rejects_config_outside_project(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (tmp_path / ".sastrc").write_text("exclusions:\n  paths:\n    - '**'\n")
+    with pytest.raises(ValueError, match="outside the project directory"):
+        load_exclude_patterns(str(tmp_path / ".sastrc"), str(project / ".sastignore"), str(project))
+
+
+def test_load_exclude_patterns_rejects_fifo(tmp_path):
+    os.mkfifo(tmp_path / ".sastrc")
+    with pytest.raises(ValueError, match="not a regular file"):
+        load_exclude_patterns(str(tmp_path / ".sastrc"), str(tmp_path / ".sastignore"), str(tmp_path))
+
+
+def test_load_exclude_patterns_propagates_invalid_sastrc(tmp_path):
+    (tmp_path / ".sastrc").write_text("nope: 1\n")
+    with pytest.raises(ValueError):
+        load_exclude_patterns(str(tmp_path / ".sastrc"), str(tmp_path / ".sastignore"), str(tmp_path))

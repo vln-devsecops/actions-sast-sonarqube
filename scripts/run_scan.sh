@@ -32,7 +32,23 @@ if [[ ! -d "$PROJECT_BASE_DIR" ]]; then
   echo "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' does not exist or is not a directory." >&2
   exit 1
 fi
-ABS_PROJECT_BASE_DIR="$(cd "$PROJECT_BASE_DIR" && pwd)"
+# Resolve to the physical path (pwd -P), so what gets bind-mounted below is
+# exactly the directory that was checked, not a symbolic link to it.
+ABS_PROJECT_BASE_DIR="$(cd "$PROJECT_BASE_DIR" && pwd -P)"
+
+# Under GitHub Actions, the directory to scan must be inside the workspace.
+# Outside Actions (e.g. a manual local run) there is no workspace to
+# confine to, so this check is skipped.
+if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
+  if ! ABS_WORKSPACE="$(cd "$GITHUB_WORKSPACE" && pwd -P)"; then
+    echo "GITHUB_WORKSPACE '${GITHUB_WORKSPACE}' is not an accessible directory." >&2
+    exit 1
+  fi
+  if [[ "$ABS_PROJECT_BASE_DIR" != "$ABS_WORKSPACE" && "$ABS_PROJECT_BASE_DIR" != "$ABS_WORKSPACE"/* ]]; then
+    echo "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' resolves to '${ABS_PROJECT_BASE_DIR}', outside GITHUB_WORKSPACE '${ABS_WORKSPACE}'." >&2
+    exit 1
+  fi
+fi
 
 # Single source of truth for the sonar-scanner-cli version is the inert
 # `scanner` profile service in docker-compose.ephemeral.yml, so Dependabot
@@ -77,6 +93,14 @@ SCANNER_LOG_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/sonar-scanner-log.XXXXXX")"
 UNANALYZED_LANGUAGES_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/sonar-unanalyzed-languages.XXXXXX")"
 trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}" "${SCANNER_LOG_FILE}" "${UNANALYZED_LANGUAGES_FILE}"' EXIT
 
+# The scanner would otherwise load sonar-project.properties from the
+# project directory by itself, with every key in it applied. Point its
+# project.settings at an empty file outside the project mount instead;
+# build_scan_config.py reads the consumer's file as data and passes on only
+# the supported keys (see project_properties.py).
+EMPTY_PROJECT_SETTINGS_NAME="empty-sonar-project.properties"
+: > "${SCANNER_CACHE_DIR}/${EMPTY_PROJECT_SETTINGS_NAME}"
+
 # Translate the consumer's optional .sastrc/.sastignore noise-reduction
 # files (neither need exist) into extra sonar-scanner -D properties. This
 # always runs - build_scan_config.py itself treats a missing file as
@@ -85,6 +109,8 @@ trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}" "${SCANNER_LOG_F
 build_scan_config_args=(
   --config "$SAST_CONFIG_FILE"
   --ignore-file "$SAST_IGNORE_FILE"
+  --project-properties "${PROJECT_BASE_DIR}/sonar-project.properties"
+  --project-base-dir "$PROJECT_BASE_DIR"
   --out "$EXTRA_ARGS_FILE"
 )
 if [[ "${SCM_DISABLED:-false}" == "true" ]]; then
@@ -108,9 +134,11 @@ docker run --rm \
   -Dsonar.projectKey="${PROJECT_KEY}" \
   -Dsonar.projectBaseDir=/usr/src \
   -Dsonar.working.directory=/usr/src/.scannerwork \
+  -Dproject.settings="/tmp/sonar-cache/${EMPTY_PROJECT_SETTINGS_NAME}" \
   "${EXTRA_SCANNER_ARGS[@]}" \
   2>&1 | tee "$SCANNER_LOG_FILE"
-  # ^ sonar.working.directory: the current SonarScanner Engine
+  # ^ project.settings: see EMPTY_PROJECT_SETTINGS_NAME above.
+  # sonar.working.directory: the current SonarScanner Engine
   #   (sonar-scanner-cli 12.x / engine 8.x) defaults this to
   #   /tmp/.scannerwork inside the container - not a path under
   #   projectBaseDir - so report-task.txt (read back from the host below)
@@ -142,6 +170,7 @@ python3 "$(dirname "${BASH_SOURCE[0]}")/detect_unanalyzed_languages.py" \
   --project-base-dir "$ABS_PROJECT_BASE_DIR" \
   --config "$SAST_CONFIG_FILE" \
   --ignore-file "$SAST_IGNORE_FILE" \
+  --config-base-dir "$PROJECT_BASE_DIR" \
   --out "$UNANALYZED_LANGUAGES_FILE"
 UNANALYZED_LANGUAGES="$(cat "$UNANALYZED_LANGUAGES_FILE")"
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
