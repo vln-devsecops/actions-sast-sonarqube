@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from build_scan_config import (
@@ -282,3 +284,234 @@ def test_build_scan_properties_scm_disabled_combines_with_sastrc():
         "exclusions:\n  paths: [\"vendor/**\"]\n", None, scm_disabled=True
     )
     assert props == ["sonar.scm.disabled=true", "sonar.exclusions=vendor/**"]
+
+
+# --- parse_sastrc: error messages ------------------------------------------
+
+
+def test_parse_sastrc_yaml_error_reports_position_without_file_content():
+    marker = "UNIQUE-CONTENT-MARKER-7f3a"
+    text = f"exclusions:\n  paths: [{marker}\n  other: {marker}: :\n"
+    with pytest.raises(ValueError) as excinfo:
+        parse_sastrc(text)
+    message = str(excinfo.value)
+    assert "not valid YAML" in message
+    assert "line" in message and "column" in message
+    assert marker not in message
+
+
+def test_parse_sastrc_yaml_error_without_position_still_reports_cleanly(monkeypatch):
+    import build_scan_config
+
+    def _raise(_text):
+        raise build_scan_config.yaml.YAMLError("UNIQUE-CONTENT-MARKER-7f3a")
+
+    monkeypatch.setattr(build_scan_config.yaml, "safe_load", _raise)
+    with pytest.raises(ValueError) as excinfo:
+        parse_sastrc("exclusions: {}\n")
+    assert "not valid YAML" in str(excinfo.value)
+    assert "UNIQUE-CONTENT-MARKER-7f3a" not in str(excinfo.value)
+
+
+# --- read_config_file: path validation ---------------------------------------
+
+
+@pytest.fixture
+def project(tmp_path):
+    base = tmp_path / "project"
+    base.mkdir()
+    return base
+
+
+def test_read_config_file_reads_regular_file_inside_project(project):
+    from build_scan_config import read_config_file
+
+    (project / ".sastrc").write_text("exclusions:\n  paths: [\"vendor/**\"]\n")
+    assert read_config_file(str(project / ".sastrc"), str(project)) == (
+        "exclusions:\n  paths: [\"vendor/**\"]\n"
+    )
+
+
+def test_read_config_file_reads_regular_file_in_subdirectory(project):
+    from build_scan_config import read_config_file
+
+    (project / "config").mkdir()
+    (project / "config" / "sastignore").write_text("*.log\n")
+    assert read_config_file(str(project / "config" / "sastignore"), str(project)) == "*.log\n"
+
+
+def test_read_config_file_missing_file_is_none(project):
+    from build_scan_config import read_config_file
+
+    assert read_config_file(str(project / ".sastrc"), str(project)) is None
+
+
+def test_read_config_file_missing_parent_directory_is_none(project):
+    from build_scan_config import read_config_file
+
+    assert read_config_file(str(project / "nope" / ".sastrc"), str(project)) is None
+
+
+def test_read_config_file_accepts_relative_paths(project, monkeypatch):
+    from build_scan_config import read_config_file
+
+    (project / ".sastignore").write_text("*.log\n")
+    monkeypatch.chdir(project.parent)
+    assert read_config_file("project/.sastignore", "project") == "*.log\n"
+
+
+def test_read_config_file_refuses_symlinked_file(project, tmp_path):
+    from build_scan_config import read_config_file
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not project content\n")
+    (project / ".sastignore").symlink_to(outside)
+    with pytest.raises(ValueError, match="symbolic link"):
+        read_config_file(str(project / ".sastignore"), str(project))
+
+
+def test_read_config_file_refuses_symlink_even_when_target_is_inside_project(project):
+    from build_scan_config import read_config_file
+
+    (project / "real-sastrc").write_text("exclusions: {}\n")
+    (project / ".sastrc").symlink_to(project / "real-sastrc")
+    with pytest.raises(ValueError, match="symbolic link"):
+        read_config_file(str(project / ".sastrc"), str(project))
+
+
+def test_read_config_file_refuses_dangling_symlink(project, tmp_path):
+    from build_scan_config import read_config_file
+
+    (project / ".sastrc").symlink_to(tmp_path / "does-not-exist")
+    with pytest.raises(ValueError, match="symbolic link"):
+        read_config_file(str(project / ".sastrc"), str(project))
+
+
+def test_read_config_file_refuses_symlinked_parent_directory(project, tmp_path):
+    from build_scan_config import read_config_file
+
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    (outside_dir / "sastignore").write_text("not project content\n")
+    (project / "config").symlink_to(outside_dir, target_is_directory=True)
+    with pytest.raises(ValueError, match="symbolic link"):
+        read_config_file(str(project / "config" / "sastignore"), str(project))
+
+
+def test_read_config_file_refuses_path_outside_project(project, tmp_path):
+    from build_scan_config import read_config_file
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not project content\n")
+    with pytest.raises(ValueError, match="outside the project directory"):
+        read_config_file(str(project / ".." / "outside.txt"), str(project))
+
+
+def test_read_config_file_refuses_absolute_path_outside_project(project, tmp_path):
+    from build_scan_config import read_config_file
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not project content\n")
+    with pytest.raises(ValueError, match="outside the project directory"):
+        read_config_file(str(outside), str(project))
+
+
+def test_read_config_file_refuses_project_base_dir_itself(project):
+    from build_scan_config import read_config_file
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        read_config_file(str(project), str(project))
+
+
+def test_read_config_file_refuses_directory(project):
+    from build_scan_config import read_config_file
+
+    (project / ".sastrc").mkdir()
+    with pytest.raises(ValueError, match="not a regular file"):
+        read_config_file(str(project / ".sastrc"), str(project))
+
+
+def test_read_config_file_refuses_fifo(project):
+    from build_scan_config import read_config_file
+
+    os.mkfifo(project / ".sastignore")
+    with pytest.raises(ValueError, match="not a regular file"):
+        read_config_file(str(project / ".sastignore"), str(project))
+
+
+def test_read_config_file_works_when_project_base_dir_is_reached_via_symlink(tmp_path):
+    # The project directory itself may sit behind a symlink (e.g. a
+    # runner's workspace path); only components below it are checked.
+    from build_scan_config import read_config_file
+
+    real = tmp_path / "real-project"
+    real.mkdir()
+    (real / ".sastrc").write_text("exclusions: {}\n")
+    link = tmp_path / "linked-project"
+    link.symlink_to(real, target_is_directory=True)
+    assert read_config_file(str(link / ".sastrc"), str(link)) == "exclusions: {}\n"
+
+
+def test_read_config_file_error_does_not_include_file_content(project, tmp_path):
+    from build_scan_config import read_config_file
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("UNIQUE-CONTENT-MARKER-7f3a\n")
+    (project / ".sastignore").symlink_to(outside)
+    with pytest.raises(ValueError) as excinfo:
+        read_config_file(str(project / ".sastignore"), str(project))
+    assert "UNIQUE-CONTENT-MARKER-7f3a" not in str(excinfo.value)
+
+
+# --- CLI ---------------------------------------------------------------------
+
+
+def _run_cli(tmp_path, project):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "build_scan_config.py"
+    out = tmp_path / "args.bin"
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--config",
+            str(project / ".sastrc"),
+            "--ignore-file",
+            str(project / ".sastignore"),
+            "--project-base-dir",
+            str(project),
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return proc, out
+
+
+def test_cli_writes_properties_for_regular_files(project, tmp_path):
+    (project / ".sastrc").write_text("exclusions:\n  paths: [\"vendor/**\"]\n")
+    (project / ".sastignore").write_text("*.log\n")
+    proc, out = _run_cli(tmp_path, project)
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_bytes() == b"-Dsonar.exclusions=vendor/**,**/*.log,**/*.log/**\0"
+
+
+def test_cli_with_no_config_files_writes_nothing(project, tmp_path):
+    proc, out = _run_cli(tmp_path, project)
+    assert proc.returncode == 0, proc.stderr
+    assert out.read_bytes() == b""
+
+
+def test_cli_refuses_symlinked_ignore_file_without_echoing_content(project, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("UNIQUE-CONTENT-MARKER-7f3a\n")
+    (project / ".sastignore").symlink_to(outside)
+    proc, out = _run_cli(tmp_path, project)
+    assert proc.returncode != 0
+    assert "symbolic link" in proc.stderr
+    assert "UNIQUE-CONTENT-MARKER-7f3a" not in proc.stdout + proc.stderr
+    assert not out.exists() or b"UNIQUE-CONTENT-MARKER-7f3a" not in out.read_bytes()
