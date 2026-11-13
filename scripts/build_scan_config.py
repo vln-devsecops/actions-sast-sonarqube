@@ -61,6 +61,8 @@ import sys
 
 import yaml
 
+from project_properties import filter_project_properties, format_dropped_keys, parse_properties
+
 ALLOWED_TOP_LEVEL_KEYS = {"exclusions", "tests", "ignore"}
 ALLOWED_EXCLUSIONS_KEYS = {"paths", "coverage_paths", "duplication_paths"}
 ALLOWED_TESTS_KEYS = {"paths"}
@@ -209,7 +211,7 @@ def parse_sastignore(text):
     return patterns
 
 
-def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
+def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False, project_properties=None):
     """Combine optional `.sastrc` and `.sastignore` text (either may be None
     or empty) into the final ordered list of `key=value` sonar-scanner
     properties. Returns [] when both are absent/empty and scm_disabled is
@@ -217,7 +219,15 @@ def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
 
     scm_disabled=True adds sonar.scm.disabled=true, for a shallow checkout
     where the SCM sensor would otherwise warn about missing blame data for
-    every file (see run_scan.sh's SCM_DISABLED env var)."""
+    every file (see run_scan.sh's SCM_DISABLED env var).
+
+    project_properties: the already-filtered allowlisted keys from the
+    consumer's sonar-project.properties (see project_properties.py). They
+    come first; any key `.sastrc`/`.sastignore` also sets is taken from
+    those instead, so every key is emitted exactly once.
+
+    Raises ValueError if any value holds a `${...}` placeholder, which the
+    scanner would otherwise expand (including `${env.NAME}`)."""
     sastrc = parse_sastrc(sastrc_text or "")
     ignore_patterns = parse_sastignore(sastignore_text or "")
 
@@ -252,14 +262,23 @@ def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
             props.append(f"sonar.issue.ignore.multicriteria.{criterion_id}.ruleKey={rule}")
             props.append(f"sonar.issue.ignore.multicriteria.{criterion_id}.resourceKey={path}")
 
-    return props
+    sast_keys = {prop.split("=", 1)[0] for prop in props}
+    project_props = [
+        f"{key}={value}" for key, value in (project_properties or {}).items() if key not in sast_keys
+    ]
+    merged = project_props + props
+    for prop in merged:
+        key, value = prop.split("=", 1)
+        if "${" in value:
+            raise ValueError(f"{key} must not contain a ${{...}} placeholder")
+    return merged
 
 
 def _is_within(path, directory):
     return os.path.commonpath([path, directory]) == directory
 
 
-def read_config_file(path, project_base_dir):
+def read_config_file(path, project_base_dir, encoding=None, errors=None):
     """Read an optional config file that must live inside project_base_dir.
 
     Returns the file's text, or None if it does not exist. Fails closed
@@ -296,7 +315,7 @@ def read_config_file(path, project_base_dir):
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
         raise ValueError(f"{path} is not a regular file")
-    with os.fdopen(fd, "r") as f:
+    with os.fdopen(fd, "r", encoding=encoding, errors=errors) as f:
         return f.read()
 
 
@@ -304,6 +323,13 @@ def main():  # pragma: no cover - CLI glue, validated live
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Path to an optional .sastrc file (need not exist)")
     parser.add_argument("--ignore-file", required=True, help="Path to an optional .sastignore file (need not exist)")
+    parser.add_argument(
+        "--project-properties",
+        help=(
+            "Path to an optional sonar-project.properties file (need not exist); only "
+            "allowlisted keys are passed on, the rest are dropped with a warning"
+        ),
+    )
     parser.add_argument(
         "--project-base-dir",
         default=".",
@@ -320,7 +346,20 @@ def main():  # pragma: no cover - CLI glue, validated live
     try:
         sastrc_text = read_config_file(args.config, args.project_base_dir)
         sastignore_text = read_config_file(args.ignore_file, args.project_base_dir)
-        props = build_scan_properties(sastrc_text, sastignore_text, scm_disabled=args.scm_disabled)
+        project_properties, dropped_keys = {}, []
+        if args.project_properties:
+            # Same decoding as the scanner: UTF-8, malformed bytes replaced.
+            properties_text = read_config_file(
+                args.project_properties, args.project_base_dir, encoding="utf-8", errors="replace"
+            )
+            if properties_text is not None:
+                project_properties, dropped_keys = filter_project_properties(parse_properties(properties_text))
+        props = build_scan_properties(
+            sastrc_text,
+            sastignore_text,
+            scm_disabled=args.scm_disabled,
+            project_properties=project_properties,
+        )
     except ValueError as e:
         raise SystemExit(f"Invalid SAST config: {e}")
 
@@ -333,6 +372,15 @@ def main():  # pragma: no cover - CLI glue, validated live
         print(f"Applied SAST config from {args.config}", file=sys.stderr)
     if sastignore_text is not None:
         print(f"Applied SAST ignore patterns from {args.ignore_file}", file=sys.stderr)
+    if project_properties:
+        print(f"Applied sonar-project.properties keys: {', '.join(project_properties)}", file=sys.stderr)
+    if dropped_keys:
+        # Key names are consumer-supplied text: sanitised before printing,
+        # and values are never printed.
+        print(
+            "::warning::sonar-project.properties keys ignored (not in the supported list): "
+            + format_dropped_keys(dropped_keys)
+        )
 
 
 if __name__ == "__main__":

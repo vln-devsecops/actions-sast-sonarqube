@@ -81,6 +81,14 @@ SCANNER_CACHE_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/sonar-scanner-cache.XXXXXX"
 EXTRA_ARGS_FILE="$(mktemp)"
 trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}"' EXIT
 
+# The scanner would otherwise load sonar-project.properties from the
+# project directory by itself, with every key in it applied. Point its
+# project.settings at an empty file outside the project mount instead;
+# build_scan_config.py reads the consumer's file as data and passes on only
+# the supported keys (see project_properties.py).
+EMPTY_PROJECT_SETTINGS_NAME="empty-sonar-project.properties"
+: > "${SCANNER_CACHE_DIR}/${EMPTY_PROJECT_SETTINGS_NAME}"
+
 # Translate the consumer's optional .sastrc/.sastignore noise-reduction
 # files (neither need exist) into extra sonar-scanner -D properties. This
 # always runs - build_scan_config.py itself treats a missing file as
@@ -89,6 +97,7 @@ trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}"' EXIT
 build_scan_config_args=(
   --config "$SAST_CONFIG_FILE"
   --ignore-file "$SAST_IGNORE_FILE"
+  --project-properties "${PROJECT_BASE_DIR}/sonar-project.properties"
   --project-base-dir "$PROJECT_BASE_DIR"
   --out "$EXTRA_ARGS_FILE"
 )
@@ -113,8 +122,10 @@ docker run --rm \
   -Dsonar.projectKey="${PROJECT_KEY}" \
   -Dsonar.projectBaseDir=/usr/src \
   -Dsonar.working.directory=/usr/src/.scannerwork \
+  -Dproject.settings="/tmp/sonar-cache/${EMPTY_PROJECT_SETTINGS_NAME}" \
   "${EXTRA_SCANNER_ARGS[@]}"
-  # ^ sonar.working.directory: the current SonarScanner Engine
+  # ^ project.settings: see EMPTY_PROJECT_SETTINGS_NAME above.
+  # sonar.working.directory: the current SonarScanner Engine
   #   (sonar-scanner-cli 12.x / engine 8.x) defaults this to
   #   /tmp/.scannerwork inside the container - not a path under
   #   projectBaseDir - so report-task.txt (read back from the host below)
