@@ -511,6 +511,15 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "Baseline resolution: ${tier}"
 
+      # Clears .baseline-checkout first, with the exact same condition as
+      # the checkout right below - see "Remove any PR-supplied
+      # .sast-sonarqube" above and tests/test_check_checkout_order.py's
+      # find_unprotected_subdirectory_checkouts() for the general pattern
+      # this follows.
+      - name: Harden fallback checkout path (.baseline-checkout)
+        if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
+        run: rm -rf -- ./.baseline-checkout
+
       - name: Checkout target branch HEAD (fallback path only)
         if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
         uses: actions/checkout@v7

@@ -298,19 +298,15 @@ untrusted author within one job:
   matters even more, because the PR's build runs on your machine.
 - Check out with `persist-credentials: false`, so the build can't read a
   `GITHUB_TOKEN` from `.git/config`.
-- Any PR (not just `dotnet` mode's - this applies the moment the PR's
-  tree is on disk, which `cli` mode's automatic fork-PR scans do too) can
-  commit a file or a symlink at a path `sonar-pr.yml` itself later writes
-  or checks out - e.g. `.sast-sonarqube` as a symlink to `../../..`, or
-  `changed-files.txt` as a symlink to a runner-owned file. `sonar-pr.yml`
-  removes `.sast-sonarqube` (`rm -rf --`, no trailing slash, so it
-  unlinks a symlink rather than following it) immediately before
-  re-checking it out, and every intermediate file a trusted step writes
+- `sonar-pr.yml` clears each fixed checkout subdirectory it reuses
+  (`.sast-sonarqube`, `.baseline-checkout`) right before checking it out
+  again, and routes every intermediate file a trusted step writes
   (`changed-files.txt`, `new-findings.json`, `policy-result.json`, the
-  extracted baseline artifact, ...) lives under `$RUNNER_TEMP` - outside
-  the checked-out tree entirely - rather than a bare workspace-root
-  filename a PR could plant a same-named symlink at.
-  `scripts/check_checkout_order.py` enforces both structurally.
+  extracted baseline artifact, ...) through `$RUNNER_TEMP` instead of a
+  bare workspace-root filename. `scripts/check_checkout_order.py`
+  enforces the checkout-clearing pattern structurally and flags shell
+  redirects, `tee`, and output flags in `run:` blocks that bypass
+  `$RUNNER_TEMP`; other write forms need manual review.
 
 #### Fork PRs in `scanner-mode: dotnet`
 
