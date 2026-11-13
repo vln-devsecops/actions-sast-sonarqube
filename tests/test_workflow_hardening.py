@@ -28,6 +28,7 @@ ALLOWED_EXACT_TARGETS = {
 }
 ALLOWED_TARGET_PREFIXES = ("$RUNNER_TEMP/", "${RUNNER_TEMP}/")
 
+ARITHMETIC = re.compile(r"\(\(.*?\)\)")
 REDIRECT = re.compile(r"\d?>>?(?!&)\s*([^\s;|&)]+)")
 TEE = re.compile(r"\btee(?:\s+-a)?\s+([^\s;|&)]+)")
 OUTPUT_FLAG = re.compile(r"--(?:out|removed-out|result-out|dest)[\s=]+([^\s;|&)]+)")
@@ -41,7 +42,8 @@ def _steps(workflow):
 
 def _write_targets(script):
     lines = [line for line in script.splitlines() if not line.lstrip().startswith("#")]
-    text = "\n".join(lines)
+    # Drop bash arithmetic `(( ... ))`, where `>` is a comparison.
+    text = ARITHMETIC.sub("", "\n".join(lines))
     for pattern in (REDIRECT, TEE, OUTPUT_FLAG):
         for match in pattern.finditer(text):
             yield match.group(1).strip("\"'")
@@ -101,6 +103,7 @@ def test_run_steps_write_only_under_runner_temp(workflow):
         ('tool --dest .baseline-artifact)"', [".baseline-artifact"]),
         ("} | tee -a \"$GITHUB_STEP_SUMMARY\"", ["$GITHUB_STEP_SUMMARY"]),
         ("# a comment > ignored.txt", []),
+        ("if (( ${#items[@]} > 1 )); then echo x > out.txt; fi", ["out.txt"]),
     ],
 )
 def test_write_target_extraction(script, expected):
