@@ -286,7 +286,7 @@ only these keys:
 Every other key (server, credential, scanner runtime, proxy, cache,
 plugin, module and analyzer-runtime settings included) is ignored, and the
 job logs a warning listing the ignored key names. Path-valued keys must
-stay inside the project (no absolute paths, no `..`), no value may contain
+stay inside the project (no absolute paths, no `..`, no double quotes), no value may contain
 a `${...}` placeholder, and an invalid value for a supported key fails the
 job closed. `.sastrc`/`.sastignore` take precedence over
 `sonar-project.properties` for the same key, and the action's own

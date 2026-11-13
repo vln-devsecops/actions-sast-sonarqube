@@ -21,8 +21,8 @@ Allowlisted keys and why each is honoured:
     sonar.python.version                  which Python grammar/rules apply
     sonar.java.source                     which Java language level applies
 
-The path-valued keys must stay inside the project: absolute paths and `..`
-segments are refused. No allowlisted value may contain a `${...}`
+The path-valued keys must stay inside the project: absolute paths, `..`
+segments and double quotes are refused. No allowlisted value may contain a `${...}`
 placeholder (the scanner expands those, including `${env.NAME}`) or a
 control character. An allowlisted key with a value that fails these checks
 fails the job closed; a key outside the allowlist is dropped.
@@ -156,6 +156,11 @@ def parse_properties(text):
 
 
 def _path_entry_is_safe(entry):
+    # The scanner reads multi-value keys as CSV and strips quotes, so a
+    # quoted entry could carry a path (or a comma) past the checks below.
+    # Quotes have no use in a project-relative path or glob: refuse them.
+    if '"' in entry:
+        return False
     if entry.startswith(("/", "\\")) or _WINDOWS_DRIVE.match(entry):
         return False
     return ".." not in re.split(r"[/\\]", entry)
@@ -171,7 +176,7 @@ def _check_value(key, value):
             if not _path_entry_is_safe(entry.strip()):
                 raise ValueError(
                     f"sonar-project.properties: {key} must only list paths inside the project "
-                    "(no absolute paths, no '..')"
+                    "(no absolute paths, no '..', no quotes)"
                 )
     elif not SCALAR_KEY_PATTERNS[key].fullmatch(value):
         raise ValueError(f"sonar-project.properties: {key} has a value in an unexpected format")
