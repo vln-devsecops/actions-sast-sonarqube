@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.2](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.2.1...v1.2.2) (2026-11-13)
+
+
+### Bug Fixes
+
+* **config:** harden configuration file and workspace path handling ([#55](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/55)) ([289beea](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/289beead0d36b6eb759b95102962374e8971fbe3))
+* **scan:** pin scanner connection and runtime settings ([#57](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/57)) ([fe40e89](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/fe40e898499b321c1a21bafef708d0949739ec21))
+* **workflows:** check out the action's source outside the scanned project ([#56](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/56)) ([606b39b](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/606b39bd9b99d36ae464e0fc5e413a38ce3f3d7d))
+
 ## [1.2.1](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.2.0...v1.2.1) (2026-09-23)
 
 
