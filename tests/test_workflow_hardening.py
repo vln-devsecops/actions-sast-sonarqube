@@ -12,7 +12,12 @@ tests pin the invariants that layout depends on:
   directory with the caller's content;
 * neither sibling directory (``.sast-sonarqube`` or ``.baseline-checkout``)
   lies under any directory passed to the scanner as ``project-base-dir``,
-  for every step that invokes the scanner (``uses: ./.sast-sonarqube``); and
+  for every step that invokes the scanner (``uses: ./.sast-sonarqube``);
+* every checkout into a fixed `path:` (``src``, ``.sast-sonarqube``,
+  ``.baseline-checkout``) is immediately preceded by a step that removes
+  that path, under the same `if:` condition - clearing each fixed checkout
+  path before use, independent of what an earlier job on the same runner
+  left behind there; and
 * no `run:` step writes its intermediate files to a workspace-relative path -
   scratch files go under $RUNNER_TEMP instead.
 """
@@ -123,6 +128,32 @@ def test_sibling_dirs_not_under_scanned_project_base_dir(workflow):
                 f"passed to the scanner ({value!r}, resolved prefix {prefix_dir!r})"
             )
     assert checked > 0, f"{workflow}: expected at least one step invoking the scanner"
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS)
+def test_checkouts_into_fixed_path_are_preceded_by_removal(workflow):
+    checked = 0
+    for job_name, steps in _steps(workflow):
+        for index, step in enumerate(steps):
+            if not str(step.get("uses", "")).startswith("actions/checkout@"):
+                continue
+            path = (step.get("with") or {}).get("path")
+            if path is None:
+                continue
+            checked += 1
+            assert index > 0, f"{workflow}:{job_name}: checkout into {path} is the first step"
+            previous = steps[index - 1]
+            script = previous.get("run", "")
+            removal = re.compile(rf"(^|\s)rm -rf -- \./{re.escape(path)}(\s|$)")
+            assert removal.search(script), (
+                f"{workflow}:{job_name}: checkout into {path!r} is not immediately "
+                f"preceded by `rm -rf -- ./{path}`"
+            )
+            assert previous.get("if") == step.get("if"), (
+                f"{workflow}:{job_name}: removal of {path!r} does not share the "
+                "checkout's `if:` condition"
+            )
+    assert checked > 0, f"{workflow}: expected at least one checkout into a fixed path"
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS)
