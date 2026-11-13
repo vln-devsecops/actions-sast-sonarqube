@@ -97,14 +97,12 @@ def parse_sastrc(text):
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        # Report position only: PyYAML's own message quotes the offending
-        # line, and config file content does not belong in job logs.
-        mark = getattr(e, "problem_mark", None)
-        if mark is not None:
-            raise ValueError(
-                f".sastrc is not valid YAML (line {mark.line + 1}, column {mark.column + 1})"
-            ) from None
-        raise ValueError(".sastrc is not valid YAML") from None
+        # By this point the file has already passed read_config_file()'s
+        # checks (a regular file inside project-base-dir, reached through
+        # no symbolic link), so it's just the repo's own file - PyYAML's
+        # own message, which quotes the offending line, is safe and useful
+        # to include here.
+        raise ValueError(f".sastrc is not valid YAML: {e}") from None
 
     if data is None:
         return result

@@ -265,7 +265,7 @@ or `sonar.working.directory` through either file.
 Both files must be regular files inside `project-base-dir`. A path that
 resolves outside it, or that is (or passes through) a symbolic link below
 it, also fails the job closed - commit the file itself rather than a link
-to it. YAML syntax errors in `.sastrc` are reported by line and column only.
+to it.
 
 ## Testing
 
