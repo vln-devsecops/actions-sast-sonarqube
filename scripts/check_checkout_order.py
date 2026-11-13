@@ -119,18 +119,47 @@ def _all_string_values(obj):
             yield from _all_string_values(value)
 
 
-# A step whose ENTIRE `run:` body is just this - no trailing `&&`, no
-# second command - unlinks ACTION_SOURCE_PATH without reading or
-# executing anything under it (the symlink-hardening step right before
-# the re-checkout). That's not a "use" the way the broad substring scan
-# below means it - narrow and exact on purpose, so a step that combines
-# the removal with anything else is still caught by that broader rule.
-_PURE_REMOVAL_RE = re.compile(r"^rm\s+-rf\s+(?:--\s+)?\.?/?" + re.escape(ACTION_SOURCE_PATH) + r"$")
+# A step whose ENTIRE `run:` body is one or more lines, each one a plain
+# `rm -rf [--] <path> [<path> ...]` - no trailing `&&`, no second command
+# of any other kind. Used both to exempt such a step from
+# _uses_action_source()'s broad scan below, and by
+# find_unprotected_subdirectory_checkouts() to recognize that a given
+# checkout target was cleared first. The path-list capture excludes `&`,
+# `|`, and `;`, so a line that combines a removal with anything else
+# ("rm -rf -- X && cat Y") doesn't match here at all (the capture can't
+# reach end-of-line without crossing one of those characters) and falls
+# through to the broader substring rule instead of being misread as
+# "removes X, Y, &&, and cat".
+_REMOVAL_LINE_RE = re.compile(r"^rm\s+-rf\s+(?:--\s+)?([^&|;]+)$")
+
+
+def _removed_paths(step):
+    """Return the set of workspace-relative paths (normalized the same
+    way _checkout_path() normalizes a checkout's `with.path`) a step's
+    `run:` text consists ENTIRELY of removing - empty when the step isn't
+    a pure removal at all (any line that doesn't match _REMOVAL_LINE_RE
+    disqualifies the whole step, not just that line)."""
+    run = (step or {}).get("run", "")
+    if not isinstance(run, str):
+        return set()
+    lines = [line.strip() for line in run.strip().splitlines() if line.strip()]
+    if not lines:
+        return set()
+    paths = set()
+    for line in lines:
+        match = _REMOVAL_LINE_RE.match(line)
+        if not match:
+            return set()
+        for raw_path in match.group(1).split():
+            path = raw_path
+            if path.startswith("./"):
+                path = path[2:]
+            paths.add(path.rstrip("/"))
+    return paths
 
 
 def _is_pure_action_source_removal(step):
-    run = (step or {}).get("run", "")
-    return isinstance(run, str) and bool(_PURE_REMOVAL_RE.match(run.strip()))
+    return ACTION_SOURCE_PATH in _removed_paths(step)
 
 
 def _uses_action_source(step):
@@ -202,6 +231,42 @@ def find_mismatched_recheckout_conditions(steps):
     return violations
 
 
+def find_unprotected_subdirectory_checkouts(steps):
+    """Return the names (or `step[i]`) of every checkout step targeting a
+    fixed, non-root workspace subdirectory (per _checkout_path()) that
+    runs after a root-level checkout (per _is_root_checkout - that's what
+    first puts caller-controlled content on disk) without being preceded,
+    anywhere from that point on, by a step purely removing that exact
+    path first (per _removed_paths()). A checkout that happens BEFORE any
+    root checkout (e.g. this action's own first checkout of its source)
+    doesn't need one: nothing caller-controlled is on disk yet.
+
+    Generalizes the .sast-sonarqube re-checkout's own removal step (the
+    original, specific fix) to every such checkout - e.g. sonar-pr.yml's
+    `.baseline-checkout` fallback target too.
+
+    Unlike find_mismatched_recheckout_conditions() above, "preceded by"
+    here means anywhere from the first root checkout onward, not
+    immediately before: nothing recreates a removed path on its own, so
+    the gap between the removal and the checkout it protects doesn't
+    matter the way it does for the root-checkout/re-checkout `if:`
+    pairing.
+    """
+    violations = []
+    removed_so_far = set()
+    root_checkout_seen = False
+    for index, step in enumerate(steps):
+        step = step or {}
+        removed_so_far |= _removed_paths(step)
+        path = _checkout_path(step)
+        if _is_checkout_step(step):
+            if root_checkout_seen and path and path not in removed_so_far:
+                violations.append(step.get("name") or f"step[{index}]")
+            if not path:
+                root_checkout_seen = True
+    return violations
+
+
 # --- workspace-root write detection ---------------------------------------------
 
 # A target token: either a double-quoted string (captured without its
@@ -210,12 +275,26 @@ def find_mismatched_recheckout_conditions(steps):
 # substitution), a backslash (line continuation), `&`/`|`/`;` (control
 # operators, so "2>&1" can never capture "&1" as a target).
 _TOKEN = r'(?:"([^"]+)"|([^\s")(\\&|;]+))'
-_WRITE_FLAG_RE = re.compile(r"--(?:out|dest|result-out|removed-out)\s+" + _TOKEN)
-# >, >>; deliberately NOT preceded-by-check for "2>" etc. - a target
-# starting with "/dev/null" is safe anyway (see _is_safe_write_target), and
-# fd-duplication targets like "&1" never produce a non-empty match because
-# "&" is excluded from the unquoted token's character class.
-_REDIRECT_RE = re.compile(r">>?\s*" + _TOKEN)
+
+# Long output-ish flags, both `--flag value` and `--flag=value`.
+_LONG_WRITE_FLAGS = ("out", "dest", "result-out", "removed-out", "output")
+_WRITE_FLAG_RE = re.compile(r"(?<!\S)--(?:" + "|".join(_LONG_WRITE_FLAGS) + r")(?:=|\s+)" + _TOKEN)
+# Short `-o value` / `-o=value` - excluding `set -o <shell-option>`
+# (several steps in this repo's own workflows use `set -o pipefail`,
+# `set -euo pipefail`, etc., none of which write a file named after the
+# option), which is the one common idiom this shape would otherwise
+# misread as a write.
+_SHORT_WRITE_FLAG_RE = re.compile(r"(?<!\S)(?<!set )-o(?:=|\s+)" + _TOKEN)
+# >, >>, >| (force/clobber); deliberately NOT preceded-by-check for "2>"
+# etc. - a target starting with "/dev/null" is safe anyway (see
+# _is_safe_write_target), and fd-duplication targets like "&1" never
+# produce a non-empty match because "&" is excluded from the unquoted
+# token's character class.
+_REDIRECT_RE = re.compile(r">(?:>|\|)?\s*" + _TOKEN)
+# `tee`/`tee -a` and `cp`/`mv`: their own arguments, up to the next
+# pipe/control operator or end of line, tokenized the same way.
+_TEE_ARGS_RE = re.compile(r"(?<!\S)tee\b([^|;\n]*)")
+_CP_MV_ARGS_RE = re.compile(r"(?<!\S)(?:cp|mv)\b([^|;\n]*)")
 
 # These are either outside the checked-out repo tree entirely (RUNNER_TEMP,
 # any absolute path), or GitHub-managed per-step files that are never a
@@ -237,10 +316,26 @@ def _is_safe_write_target(target):
     return target.startswith(_SAFE_WRITE_PREFIXES)
 
 
+def _plain_tokens(text):
+    """Every token in `text` per _TOKEN, unquoted."""
+    for match in re.finditer(_TOKEN, text):
+        yield match.group(1) if match.group(1) is not None else match.group(2)
+
+
 def _extract_targets(run_text):
-    for pattern in (_WRITE_FLAG_RE, _REDIRECT_RE):
+    for pattern in (_WRITE_FLAG_RE, _SHORT_WRITE_FLAG_RE, _REDIRECT_RE):
         for match in pattern.finditer(run_text):
             yield match.group(1) if match.group(1) is not None else match.group(2)
+    for match in _TEE_ARGS_RE.finditer(run_text):
+        for token in _plain_tokens(match.group(1)):
+            if not token.startswith("-"):
+                yield token
+    for match in _CP_MV_ARGS_RE.finditer(run_text):
+        tokens = [t for t in _plain_tokens(match.group(1)) if not t.startswith("-")]
+        if len(tokens) >= 2:
+            # Only the LAST (destination) argument is a write target -
+            # every earlier one is a source, read rather than written.
+            yield tokens[-1]
 
 
 # A plain `name=value` or `name="value"` assignment line - resolved below
@@ -285,13 +380,19 @@ def _resolve_target(target, assignments, _seen=frozenset()):
 
 def find_workspace_write_violations(steps):
     """Return (step_name, target) pairs for every `run:` step that writes
-    (via a shell redirect or a `--out`/`--dest`/`--result-out`/`--removed-out`
-    script flag - see the module docstring) to a target that isn't under
-    $RUNNER_TEMP, absolute, `/dev/null`, or a GitHub-managed per-step file -
-    i.e. a bare path under the workspace root a hostile PR tree could have
-    pre-committed a same-named symlink at. `target` in each returned pair
-    is the RESOLVED path (see _resolve_target) when the `run:` text used a
-    local variable, so a report is always a real path, not just "$foo"."""
+    to a bare, workspace-root-relative target instead of one that's
+    $RUNNER_TEMP-rooted, absolute, `/dev/null`, or a GitHub-managed
+    per-step file.
+
+    Flags shell redirects (`>`, `>>`, `>|`), `tee`/`tee -a`, `cp`/`mv`'s
+    last argument, and output flags (`--out`, `--dest`, `--result-out`,
+    `--removed-out`, `--output`, `-o`, each as `flag value` or
+    `flag=value`) in `run:` blocks; other write forms need review - this
+    is a heuristic text scan, not a shell interpreter.
+
+    `target` in each returned pair is the RESOLVED path (see
+    _resolve_target) when the `run:` text used a local variable, so a
+    report is always a real path, not just "$foo"."""
     violations = []
     for index, step in enumerate(steps):
         run = (step or {}).get("run", "")
