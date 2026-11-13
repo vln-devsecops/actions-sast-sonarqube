@@ -95,6 +95,13 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      # The workspace root holds the PR's own checkout, so this workflow's
+      # intermediate files live in a per-job scratch directory instead.
+      - name: Prepare scratch directory
+        run: |
+          rm -rf -- "${RUNNER_TEMP}/sonar-pr"
+          mkdir -p -- "${RUNNER_TEMP}/sonar-pr"
+
       - name: Fetch base branch history
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -120,13 +127,13 @@ jobs:
           base_dir="${PROJECT_BASE_DIR#./}"
           base_dir="${base_dir%/}"
           if [[ -z "$base_dir" || "$base_dir" == "." ]]; then
-            git diff --name-only "${merge_base}..HEAD" > changed-files.txt
+            git diff --name-only "${merge_base}..HEAD" > "${RUNNER_TEMP}/sonar-pr/changed-files.txt"
           else
             git diff --name-only "${merge_base}..HEAD" -- "$base_dir" \
-              | sed "s#^${base_dir}/##" > changed-files.txt
+              | sed "s#^${base_dir}/##" > "${RUNNER_TEMP}/sonar-pr/changed-files.txt"
           fi
           echo "Files touched by this PR (relative to project-base-dir):"
-          cat changed-files.txt
+          cat "${RUNNER_TEMP}/sonar-pr/changed-files.txt"
 
       # This reusable workflow is meant to be called by other repos, so it
       # can't assume its own composite action (action.yml) is checked out at
@@ -149,6 +156,11 @@ jobs:
           echo "repo=${repo}" >> "$GITHUB_OUTPUT"
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
 
+      # Start the checkout from a fresh directory. No trailing slash, so a
+      # symbolic link at this path is removed itself rather than followed.
+      - name: Clear action source directory
+        run: rm -rf -- ./.sast-sonarqube
+
       - name: Checkout this action's source
         uses: actions/checkout@v7
         with:
@@ -169,7 +181,7 @@ jobs:
           ARTIFACT_NAME: sonar-baseline-${{ steps.refs.outputs.merge-base }}
         run: |
           found="$(python3 .sast-sonarqube/scripts/find_baseline_artifact.py \
-            --repo "$REPO" --name "$ARTIFACT_NAME" --dest .baseline-artifact)"
+            --repo "$REPO" --name "$ARTIFACT_NAME" --dest "${RUNNER_TEMP}/sonar-pr/baseline-artifact")"
           echo "found=${found}" >> "$GITHUB_OUTPUT"
 
       - name: "Look up baseline artifact (tier b: target branch current HEAD)"
@@ -181,7 +193,7 @@ jobs:
           ARTIFACT_NAME: sonar-baseline-${{ steps.refs.outputs.target-head-sha }}
         run: |
           found="$(python3 .sast-sonarqube/scripts/find_baseline_artifact.py \
-            --repo "$REPO" --name "$ARTIFACT_NAME" --dest .baseline-artifact)"
+            --repo "$REPO" --name "$ARTIFACT_NAME" --dest "${RUNNER_TEMP}/sonar-pr/baseline-artifact")"
           echo "found=${found}" >> "$GITHUB_OUTPUT"
 
       - name: Record baseline resolution
@@ -205,6 +217,12 @@ jobs:
             echo "${tier}"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "Baseline resolution: ${tier}"
+
+      # Start the checkout from a fresh directory. No trailing slash, so a
+      # symbolic link at this path is removed itself rather than followed.
+      - name: Clear fallback checkout directory (fallback path only)
+        if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
+        run: rm -rf -- ./.baseline-checkout
 
       - name: Checkout target branch HEAD (fallback path only)
         if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true'
@@ -264,8 +282,8 @@ jobs:
         id: fallback-empty-baseline
         if: steps.tier-a.outputs.found != 'true' && steps.tier-b.outputs.found != 'true' && steps.fallback-base-dir-check.outputs.exists != 'true'
         run: |
-          echo '[]' > empty-baseline-findings.json
-          echo "findings-json=empty-baseline-findings.json" >> "$GITHUB_OUTPUT"
+          echo '[]' > "${RUNNER_TEMP}/sonar-pr/empty-baseline-findings.json"
+          echo "findings-json=${RUNNER_TEMP}/sonar-pr/empty-baseline-findings.json" >> "$GITHUB_OUTPUT"
 
       - name: Scan PR head
         id: head-scan
@@ -318,7 +336,7 @@ jobs:
             # -type f and a sort make the choice deterministic rather than
             # dependent on directory order; an artifact is expected to hold
             # exactly one findings JSON.
-            mapfile -t candidates < <(find .baseline-artifact -type f -name '*.json' | sort)
+            mapfile -t candidates < <(find "${RUNNER_TEMP}/sonar-pr/baseline-artifact" -type f -name '*.json' | sort)
             if (( ${#candidates[@]} == 0 )); then
               echo "Baseline artifact contained no JSON findings file." >&2
               exit 1
@@ -353,11 +371,11 @@ jobs:
           python3 .sast-sonarqube/scripts/diff_findings.py \
             --baseline "$BASELINE_FINDINGS" \
             --head "$HEAD_FINDINGS" \
-            --changed-files changed-files.txt \
-            --out new-findings.json \
-            --removed-out removed-findings.json
-          echo "new-findings=new-findings.json" >> "$GITHUB_OUTPUT"
-          echo "removed-findings=removed-findings.json" >> "$GITHUB_OUTPUT"
+            --changed-files "${RUNNER_TEMP}/sonar-pr/changed-files.txt" \
+            --out "${RUNNER_TEMP}/sonar-pr/new-findings.json" \
+            --removed-out "${RUNNER_TEMP}/sonar-pr/removed-findings.json"
+          echo "new-findings=${RUNNER_TEMP}/sonar-pr/new-findings.json" >> "$GITHUB_OUTPUT"
+          echo "removed-findings=${RUNNER_TEMP}/sonar-pr/removed-findings.json" >> "$GITHUB_OUTPUT"
 
       - name: Apply blocking policy
         id: policy
@@ -388,7 +406,7 @@ jobs:
               --repo "$REPO" \
               --sha "$HEAD_SHA" \
               --check-name "$CHECK_NAME" \
-              --result-out policy-result.json
+              --result-out "${RUNNER_TEMP}/sonar-pr/policy-result.json"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Post PR summary comment
@@ -412,7 +430,7 @@ jobs:
           python3 .sast-sonarqube/scripts/post_pr_comment.py \
             --repo "$REPO" \
             --pr-number "$PR_NUMBER" \
-            --result policy-result.json \
+            --result "${RUNNER_TEMP}/sonar-pr/policy-result.json" \
             --baseline-findings "$BASELINE_FINDINGS" \
             --removed-findings "$REMOVED_FINDINGS" \
             --baseline-tier "$BASELINE_TIER"

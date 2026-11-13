@@ -30,6 +30,10 @@ no way to set sonar.host.url/token/projectKey/projectBaseDir/working.directory
 or any other property through either file: the schema simply has no field
 for them.
 
+Both files are read only as regular files inside project-base-dir: a path
+that resolves outside it, or that is (or passes through) a symbolic link
+below it, fails closed - see read_config_file().
+
 `tests.paths` does NOT map onto sonar.tests directly: sonar.tests only
 accepts a comma-separated list of directories, not globs, and rejects `*`
 fatally - but the whole reason this key exists is to let a caller name
@@ -52,6 +56,7 @@ that shared root are tests:
 """
 import argparse
 import os
+import stat
 import sys
 
 import yaml
@@ -92,7 +97,12 @@ def parse_sastrc(text):
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as e:
-        raise ValueError(f".sastrc is not valid YAML: {e}")
+        # By this point the file has already passed read_config_file()'s
+        # checks (a regular file inside project-base-dir, reached through
+        # no symbolic link), so it's just the repo's own file - PyYAML's
+        # own message, which quotes the offending line, is safe and useful
+        # to include here.
+        raise ValueError(f".sastrc is not valid YAML: {e}") from None
 
     if data is None:
         return result
@@ -245,10 +255,60 @@ def build_scan_properties(sastrc_text, sastignore_text, scm_disabled=False):
     return props
 
 
+def _is_within(path, directory):
+    return os.path.commonpath([path, directory]) == directory
+
+
+def read_config_file(path, project_base_dir):
+    """Read an optional config file that must live inside project_base_dir.
+
+    Returns the file's text, or None if it does not exist. Fails closed
+    (raises ValueError, without including any file content) if the path
+    resolves outside project_base_dir, if any component of it below
+    project_base_dir is a symbolic link, or if it is not a regular file.
+    project_base_dir itself may be reached through a symbolic link; only
+    the components below it are checked.
+    """
+    base_abs = os.path.abspath(project_base_dir)
+    base_real = os.path.realpath(project_base_dir)
+    rel = os.path.relpath(os.path.abspath(path), base_abs)
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+        raise ValueError(f"{path} is outside the project directory {project_base_dir}")
+
+    candidate = base_real
+    if rel != os.curdir:
+        for part in rel.split(os.sep):
+            candidate = os.path.join(candidate, part)
+            if os.path.islink(candidate):
+                raise ValueError(
+                    f"{path} is or is under a symbolic link; config files must be "
+                    "regular files inside the project directory"
+                )
+            if not os.path.lexists(candidate):
+                return None
+
+    if not _is_within(os.path.realpath(candidate), base_real):  # pragma: no cover - defence in depth
+        raise ValueError(f"{path} is outside the project directory {project_base_dir}")
+
+    # O_NOFOLLOW: never follow a link swapped in after the checks above.
+    # O_NONBLOCK: don't hang opening a FIFO before fstat can reject it.
+    fd = os.open(candidate, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise ValueError(f"{path} is not a regular file")
+    with os.fdopen(fd, "r") as f:
+        return f.read()
+
+
 def main():  # pragma: no cover - CLI glue, validated live
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Path to an optional .sastrc file (need not exist)")
     parser.add_argument("--ignore-file", required=True, help="Path to an optional .sastignore file (need not exist)")
+    parser.add_argument(
+        "--project-base-dir",
+        default=".",
+        help="Directory both config files must be inside (default: current directory)",
+    )
     parser.add_argument("--out", required=True, help="Path to write NUL-delimited -Dkey=value tokens to")
     parser.add_argument(
         "--scm-disabled",
@@ -257,17 +317,9 @@ def main():  # pragma: no cover - CLI glue, validated live
     )
     args = parser.parse_args()
 
-    sastrc_text = None
-    if os.path.isfile(args.config):
-        with open(args.config) as f:
-            sastrc_text = f.read()
-
-    sastignore_text = None
-    if os.path.isfile(args.ignore_file):
-        with open(args.ignore_file) as f:
-            sastignore_text = f.read()
-
     try:
+        sastrc_text = read_config_file(args.config, args.project_base_dir)
+        sastignore_text = read_config_file(args.ignore_file, args.project_base_dir)
         props = build_scan_properties(sastrc_text, sastignore_text, scm_disabled=args.scm_disabled)
     except ValueError as e:
         raise SystemExit(f"Invalid SAST config: {e}")
