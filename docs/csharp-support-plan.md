@@ -196,6 +196,10 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - 2026-11-12 - Fork PRs in `dotnet` mode (rlc): the fork PR's SAST job fails with "a maintainer must run the SAST workflow for this PR" and skips the build; the maintainer-triggered `workflow_dispatch` run posts the named Check Run on the PR's head SHA, so a branch rule requiring that check only goes green after a real scan.
 - 2026-11-12 - Fallback baseline in `dotnet` mode that fails to build (rlc): use an empty baseline (every head finding is new) and say so in the job summary, Check Run and PR comment; the PR head's own scan must still succeed.
 
+- 2026-11-14 - `sonar-project.properties` in `dotnet` mode (rlc): SonarScanner for .NET doesn't read the file, so the same allowlist and validation as cli mode apply and the keys are passed to `begin` as `/d:`; `sonar.sources`/`sonar.tests` are dropped with a warning (MSBuild decides sources and tests), which can only widen analysis.
+- 2026-11-14 - Workspace-check failures report `failure-reason` codes `project-base-dir-outside-workspace` and `workspace-inaccessible` (rlc).
+- 2026-11-14 - #54's `check_checkout_order.py` is replaced by `tests/test_workflow_hardening.py` asserting the `src/` layout invariants, and #54's broader workspace-write detection (`cp`/`mv`, `-o`, shell variables) is ported into dev's checker (rlc).
+
 ## Open questions
 
 - Runner requirements: do all target runners (including self-hosted, hardened `noexec` /tmp ones) allow the .NET SDK install and the scanner's JRE?
@@ -236,3 +240,4 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - 2026-11-12 - guidance#35 and devsecops.vlinder.ca#136 merged: the false C# claim is corrected everywhere it was published.
 - 2026-11-12 - Phase 4 PR #54 opened (stacked on #53) after three independent review rounds that fixed: dispatch TOCTOU (dispatch now requires the reviewed `head-sha`, re-checked live before checkout), `persist-credentials: false` breaking `git fetch` for private cli callers (fetch removed; `fetch-depth: 0` already fetches all branches), the PR checkout wiping the trusted `.sast-sonarqube` and letting a PR supply its own (re-checkout + structural order test), and `pull_request_target` (now rejected in every mode - a fork's `.sastignore` could otherwise get a green required check with the base repo's token). CI on #54 green, including `pr-scan-dotnet` (first real same-repo dotnet run through the reusable workflow). Symlink hardening (pre-existing) being added to #54.
 - 2026-11-13 - Hardening found during review split into separate PRs (#55, #56, #57) per rlc, so each appears in the changelog; container-hardening follow-up queued after #56. C# stack to be reconciled onto v1.2.2.
+- 2026-11-14 - v1.2.2 release PR #58 lists #55, #57, #56. C# stack reconciled onto dev by merge (no history rewritten): #52 641d3c7, #53 333fc92, #54 9f4ced7; CI green on all three; #54 drops its re-checkout step now that #56 checks caller code out into `src`. Independent review in progress.
