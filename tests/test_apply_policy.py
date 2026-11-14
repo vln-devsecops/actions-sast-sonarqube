@@ -176,6 +176,33 @@ def test_build_summary_banner_appears_before_the_findings_count():
     assert summary.index("Not analyzed") < summary.index("new finding(s)")
 
 
+def test_build_summary_no_baseline_note_by_default():
+    summary = build_summary([], [], "MAJOR", False)
+    assert "empty baseline" not in summary
+
+
+def test_build_summary_shows_baseline_note_when_given():
+    """The dotnet-mode fallback-build-failure case (sonar-pr.yml): say so in
+    the Check Run too, not just the job summary and PR comment - reusing
+    this one baseline_note parameter, not a separate mechanism."""
+    note = "fallback: target branch build failed in dotnet mode (failure-reason: build-command-failed) - using an empty baseline"
+    summary = build_summary([], [], "MAJOR", False, baseline_note=note)
+    assert note in summary
+
+
+def test_build_summary_baseline_note_appears_before_the_findings_count():
+    note = "fallback: target branch build failed in dotnet mode - using an empty baseline"
+    summary = build_summary([], [], "MAJOR", False, baseline_note=note)
+    assert summary.index(note) < summary.index("new finding(s)")
+
+
+def test_build_summary_baseline_note_and_unanalyzed_languages_banner_coexist():
+    note = "fallback: target branch build failed in dotnet mode - using an empty baseline"
+    summary = build_summary([], [], "MAJOR", False, unanalyzed_languages=["C#"], baseline_note=note)
+    assert note in summary
+    assert "Not analyzed" in summary
+
+
 @pytest.mark.parametrize(
     "count,size,expected_lengths",
     [
@@ -250,6 +277,60 @@ def test_main_result_includes_empty_unanalyzed_languages_by_default(tmp_path, mo
 
     result = json.loads(result_path.read_text())
     assert result["unanalyzed_languages"] == []
+
+
+def test_main_result_carries_baseline_note_through(tmp_path, monkeypatch):
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))
+
+    captured_summaries = []
+    monkeypatch.setattr(
+        apply_policy, "create_check_run",
+        lambda repo, token, sha, check_name, conclusion, summary, annotations: captured_summaries.append(summary) or None,
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+            "--baseline-note", "fallback: target branch build failed in dotnet mode - using an empty baseline",
+        ],
+    )
+
+    main()
+
+    result = json.loads(result_path.read_text())
+    assert result["baseline_note"] == "fallback: target branch build failed in dotnet mode - using an empty baseline"
+    assert "empty baseline" in captured_summaries[0]
+
+
+def test_main_result_baseline_note_empty_by_default(tmp_path, monkeypatch):
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))
+
+    monkeypatch.setattr(apply_policy, "create_check_run", lambda *a, **k: None)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+        ],
+    )
+
+    main()
+
+    result = json.loads(result_path.read_text())
+    assert result["baseline_note"] == ""
 
 
 def test_main_result_carries_unanalyzed_languages_through(tmp_path, monkeypatch):

@@ -70,6 +70,7 @@ echo '{"task":{"status":"SUCCESS"}}'
 FAKE_DOTNET = r"""#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\0' "$@" > "$FAKE_LOG_DIR/dotnet-tool.args"
+env > "$FAKE_LOG_DIR/dotnet-tool.env"
 if [[ "$1 $2" != "tool install" ]]; then
   echo "unexpected dotnet call: $*" >&2
   exit 99
@@ -97,6 +98,7 @@ set -euo pipefail
 step="$1"
 printf '%s\0' "$@" > "$FAKE_LOG_DIR/scanner-$step.args"
 pwd > "$FAKE_LOG_DIR/scanner-$step.cwd"
+env > "$FAKE_LOG_DIR/scanner-$step.env"
 if [[ "$step" == "begin" ]]; then
   [[ "${FAKE_BEGIN_MODE:-ok}" == "fail" ]] && { echo "begin failed" >&2; exit 1; }
   mkdir -p .sonarqube/conf
@@ -416,6 +418,36 @@ def test_dotnet_build_runs_in_project_base_dir_without_the_sonar_token(harness):
     build_env = (harness.log_dir / "build.env").read_text()
     assert TOKEN not in build_env
     assert "SONAR_TOKEN=" not in build_env
+
+
+def test_dotnet_build_command_inherits_nuget_auth_token_when_set(harness):
+    """Unlike SONAR_TOKEN (stripped above), NUGET_AUTH_TOKEN is NOT removed
+    from build-command's environment - action.yml scopes it to this one
+    step so it never reaches the fetch/report steps after it, but within
+    this step it reaches build-command by plain inheritance; nothing in
+    run_scan.sh needs to special-case it."""
+    result = _dotnet(
+        harness,
+        NUGET_AUTH_TOKEN="nuget-secret-token",
+        BUILD_COMMAND=f"env > {harness.log_dir}/build.env",
+    )
+    assert result.returncode == 0, result.stderr
+    build_env = (harness.log_dir / "build.env").read_text()
+    assert "NUGET_AUTH_TOKEN=nuget-secret-token" in build_env
+
+
+def test_dotnet_nuget_auth_token_does_not_reach_install_or_begin_or_end(harness):
+    """NUGET_AUTH_TOKEN is scoped to build-command only (action.yml's own
+    description promises "build only") - the dotnet-sonarscanner tool
+    install and the begin/end scanner invocations don't restore anything
+    and have no use for it, so it must be `env -u`'d from all three, not
+    just left to flow through by inheritance the way it does for
+    build-command above."""
+    result = _dotnet(harness, NUGET_AUTH_TOKEN="nuget-secret-token")
+    assert result.returncode == 0, result.stderr
+    for name in ("dotnet-tool.env", "scanner-begin.env", "scanner-end.env"):
+        env_text = (harness.log_dir / name).read_text()
+        assert "NUGET_AUTH_TOKEN" not in env_text, f"{name} leaked NUGET_AUTH_TOKEN"
 
 
 def test_dotnet_build_command_is_not_shell_interpolated_by_the_script(harness):
