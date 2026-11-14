@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="First/First.csproj" />
+  <Project Path="Second/Second.csproj" />
+  <Project Path="Unique/Unique.csproj" />
+</Solution>

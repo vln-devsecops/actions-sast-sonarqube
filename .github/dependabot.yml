@@ -12,6 +12,18 @@ updates:
     commit-message:
       prefix: "chore(docker)"
 
+  # .config/dotnet-tools.json pins dotnet-sonarscanner for scanner-mode:
+  # dotnet (the single source of truth run_scan.sh reads), and the
+  # fixtures-dotnet/ test project's NuGet references stay current too.
+  - package-ecosystem: nuget
+    directories:
+      - /
+      - /fixtures-dotnet/tiny
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(nuget)"
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

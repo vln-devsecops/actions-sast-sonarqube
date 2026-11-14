@@ -148,6 +148,61 @@ def test_build_summary_blocking_disabled_says_so():
     assert "Blocking is disabled" in summary
 
 
+def test_build_summary_no_banner_when_no_unanalyzed_languages():
+    summary = build_summary([], [], "MAJOR", False, unanalyzed_languages=[])
+    assert "Not analyzed" not in summary
+
+
+def test_build_summary_no_banner_when_unanalyzed_languages_omitted():
+    summary = build_summary([], [], "MAJOR", False)
+    assert "Not analyzed" not in summary
+
+
+def test_build_summary_shows_unanalyzed_languages_banner():
+    summary = build_summary([], [], "MAJOR", False, unanalyzed_languages=["C#", "VB.NET"])
+    assert "Not analyzed" in summary
+    assert "C#" in summary
+    assert "VB.NET" in summary
+
+
+def test_build_summary_banner_wording_is_scanner_mode_neutral():
+    summary = build_summary([], [], "MAJOR", False, unanalyzed_languages=["C#"])
+    assert "sonar-scanner-cli" not in summary
+    assert "build-command" in summary
+
+
+def test_build_summary_banner_appears_before_the_findings_count():
+    summary = build_summary([], [], "MAJOR", False, unanalyzed_languages=["Swift"])
+    assert summary.index("Not analyzed") < summary.index("new finding(s)")
+
+
+def test_build_summary_no_baseline_note_by_default():
+    summary = build_summary([], [], "MAJOR", False)
+    assert "empty baseline" not in summary
+
+
+def test_build_summary_shows_baseline_note_when_given():
+    """The dotnet-mode fallback-build-failure case (sonar-pr.yml): say so in
+    the Check Run too, not just the job summary and PR comment - reusing
+    this one baseline_note parameter, not a separate mechanism."""
+    note = "fallback: target branch build failed in dotnet mode (failure-reason: build-command-failed) - using an empty baseline"
+    summary = build_summary([], [], "MAJOR", False, baseline_note=note)
+    assert note in summary
+
+
+def test_build_summary_baseline_note_appears_before_the_findings_count():
+    note = "fallback: target branch build failed in dotnet mode - using an empty baseline"
+    summary = build_summary([], [], "MAJOR", False, baseline_note=note)
+    assert summary.index(note) < summary.index("new finding(s)")
+
+
+def test_build_summary_baseline_note_and_unanalyzed_languages_banner_coexist():
+    note = "fallback: target branch build failed in dotnet mode - using an empty baseline"
+    summary = build_summary([], [], "MAJOR", False, unanalyzed_languages=["C#"], baseline_note=note)
+    assert note in summary
+    assert "Not analyzed" in summary
+
+
 @pytest.mark.parametrize(
     "count,size,expected_lengths",
     [
@@ -198,6 +253,233 @@ def test_main_writes_result_out_even_when_check_run_publication_fails(tmp_path, 
     result = json.loads(result_path.read_text())
     assert result["check_run_url"] is None
     assert result["total_new_findings"] == 1
+
+
+def test_main_result_includes_empty_unanalyzed_languages_by_default(tmp_path, monkeypatch):
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))
+
+    monkeypatch.setattr(apply_policy, "create_check_run", lambda *a, **k: None)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+        ],
+    )
+
+    main()
+
+    result = json.loads(result_path.read_text())
+    assert result["unanalyzed_languages"] == []
+
+
+def test_main_result_carries_baseline_note_through(tmp_path, monkeypatch):
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))
+
+    captured_summaries = []
+    monkeypatch.setattr(
+        apply_policy, "create_check_run",
+        lambda repo, token, sha, check_name, conclusion, summary, annotations: captured_summaries.append(summary) or None,
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+            "--baseline-note", "fallback: target branch build failed in dotnet mode - using an empty baseline",
+        ],
+    )
+
+    main()
+
+    result = json.loads(result_path.read_text())
+    assert result["baseline_note"] == "fallback: target branch build failed in dotnet mode - using an empty baseline"
+    assert "empty baseline" in captured_summaries[0]
+
+
+def test_main_result_baseline_note_empty_by_default(tmp_path, monkeypatch):
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))
+
+    monkeypatch.setattr(apply_policy, "create_check_run", lambda *a, **k: None)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+        ],
+    )
+
+    main()
+
+    result = json.loads(result_path.read_text())
+    assert result["baseline_note"] == ""
+
+
+def test_main_result_carries_unanalyzed_languages_through(tmp_path, monkeypatch):
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))
+
+    monkeypatch.setattr(apply_policy, "create_check_run", lambda *a, **k: None)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+            "--unanalyzed-languages", "C#,VB.NET",
+        ],
+    )
+
+    main()
+
+    result = json.loads(result_path.read_text())
+    assert result["unanalyzed_languages"] == ["C#", "VB.NET"]
+
+
+def test_main_check_run_conclusion_is_failure_when_fail_on_unanalyzed_and_languages_found(tmp_path, monkeypatch):
+    """A protected branch's required-status-check gate reads the GitHub
+    Check Run's own `conclusion`, not this workflow job's overall pass/fail
+    - so fail-on-unanalyzed-languages must flip *that*, not just make the
+    action step fail, or a branch requiring this check can still merge."""
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))  # no findings - would otherwise conclude "success"
+
+    captured_conclusions = []
+    monkeypatch.setattr(
+        apply_policy, "create_check_run",
+        lambda repo, token, sha, check_name, conclusion, summary, annotations: captured_conclusions.append(conclusion),
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+            "--unanalyzed-languages", "C#,C++",
+            "--fail-on-unanalyzed", "true",
+        ],
+    )
+
+    main()
+
+    assert captured_conclusions == ["failure"]
+
+
+def test_main_check_run_conclusion_stays_success_when_fail_on_unanalyzed_is_false(tmp_path, monkeypatch):
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))
+
+    captured_conclusions = []
+    monkeypatch.setattr(
+        apply_policy, "create_check_run",
+        lambda repo, token, sha, check_name, conclusion, summary, annotations: captured_conclusions.append(conclusion),
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+            "--unanalyzed-languages", "C#,C++",
+            "--fail-on-unanalyzed", "false",
+        ],
+    )
+
+    main()
+
+    assert captured_conclusions == ["success"]
+
+
+def test_main_check_run_conclusion_stays_success_when_fail_on_unanalyzed_true_but_nothing_found(tmp_path, monkeypatch):
+    """The flag alone must not flip the conclusion - only "true" AND a
+    non-empty unanalyzed-languages list together do."""
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([]))
+
+    captured_conclusions = []
+    monkeypatch.setattr(
+        apply_policy, "create_check_run",
+        lambda repo, token, sha, check_name, conclusion, summary, annotations: captured_conclusions.append(conclusion),
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+            "--fail-on-unanalyzed", "true",
+        ],
+    )
+
+    main()
+
+    assert captured_conclusions == ["success"]
+
+
+def test_main_check_run_conclusion_stays_failure_when_already_blocked(tmp_path, monkeypatch):
+    """fail-on-unanalyzed must not downgrade an already-failing conclusion -
+    there's nothing to override when a blocking finding already set it."""
+    findings_path = tmp_path / "findings.json"
+    result_path = tmp_path / "result.json"
+    findings_path.write_text(json.dumps([{"rule": "r", "path": "a.py", "line": 1, "severity": "BLOCKER", "message": "m"}]))
+
+    captured_conclusions = []
+    monkeypatch.setattr(
+        apply_policy, "create_check_run",
+        lambda repo, token, sha, check_name, conclusion, summary, annotations: captured_conclusions.append(conclusion),
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "apply_policy.py",
+            "--findings", str(findings_path),
+            "--repo", "o/r",
+            "--sha", "abc123",
+            "--result-out", str(result_path),
+            "--unanalyzed-languages", "C#",
+            "--fail-on-unanalyzed", "true",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        main()
+
+    assert captured_conclusions == ["failure"]
 
 
 def test_main_result_out_gets_the_check_run_url_on_success(tmp_path, monkeypatch):

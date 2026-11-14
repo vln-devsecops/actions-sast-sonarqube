@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Excluded/Excluded.csproj" />
+  <Project Path="Normal/Normal.csproj" />
+</Solution>

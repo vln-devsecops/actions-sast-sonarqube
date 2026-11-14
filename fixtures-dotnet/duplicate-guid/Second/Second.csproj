@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Bad-case fixture: First and Second share a ProjectGuid on purpose.
+       `end` then skips both ("Duplicate ProjectGuid ... will not be
+       analyzed") yet exits 0 - the scan must FAIL. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ProjectGuid>{11111111-2222-3333-4444-555555555555}</ProjectGuid>
+  </PropertyGroup>
+
+</Project>

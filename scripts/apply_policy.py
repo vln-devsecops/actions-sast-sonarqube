@@ -82,9 +82,31 @@ def counts_by_severity(findings):
     return counts
 
 
-def build_summary(findings, blocking_findings, threshold, blocking_enabled):
+def build_summary(findings, blocking_findings, threshold, blocking_enabled, unanalyzed_languages=None, baseline_note=""):
     counts = counts_by_severity(findings)
-    lines = [
+    lines = []
+    # scanner-mode: dotnet's fallback-baseline decision (docs/csharp-support-plan.md,
+    # the 2026-11-12 "Fallback baseline in dotnet mode" decision): when the
+    # target-branch fallback scan's build fails, sonar-pr.yml uses an empty
+    # baseline instead of failing the job, and passes the same note string
+    # it puts in the job summary and PR comment here too - ahead of the
+    # finding counts below, for the same "not an afterthought" reason as
+    # the unanalyzed-languages banner just below.
+    if baseline_note:
+        lines += [f"**Baseline note:** {baseline_note}", ""]
+    # A `cli`-mode scan must never present a clean result for files it
+    # didn't analyze (see detect_unanalyzed_languages.py) - put this ahead
+    # of the finding counts below, not after, so it can't read as an
+    # afterthought to an otherwise-clean Check Run.
+    if unanalyzed_languages:
+        lines += [
+            f"**Not analyzed:** {', '.join(unanalyzed_languages)}. This scan's scanner can't "
+            "analyze these languages, or (scanner-mode: dotnet) build-command didn't compile "
+            "these files - they were NOT analyzed, so the finding counts below say nothing "
+            "about them.",
+            "",
+        ]
+    lines += [
         f"Found {len(findings)} new finding(s) not present in the baseline.",
         "",
         "| Severity | Count |",
@@ -166,6 +188,28 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
     parser.add_argument("--repo", required=True, help="owner/repo")
     parser.add_argument("--sha", required=True, help="commit SHA the check run attaches to (PR head SHA)")
     parser.add_argument("--check-name", default="sonarqube-community/new-findings")
+    parser.add_argument(
+        "--unanalyzed-languages",
+        default="",
+        help="Comma-separated list of languages this scan could not analyze (see detect_unanalyzed_languages.py); empty when none",
+    )
+    parser.add_argument(
+        "--fail-on-unanalyzed",
+        default="false",
+        choices=["true", "false"],
+        help="Mirrors the action's fail-on-unanalyzed-languages input - when true and --unanalyzed-languages is non-empty, the Check Run concludes 'failure' too, not just the workflow job",
+    )
+    parser.add_argument(
+        "--baseline-note",
+        default="",
+        help=(
+            "Optional human-readable note about the baseline this run diffed against "
+            "(e.g. scanner-mode: dotnet's fallback-build-failure empty-baseline case - "
+            "see docs/csharp-support-plan.md). Empty when there's nothing to say; "
+            "surfaced in the Check Run summary ahead of the finding counts, same as "
+            "the unanalyzed-languages banner."
+        ),
+    )
     parser.add_argument("--result-out", required=True, help="Path to write the policy result JSON to")
     args = parser.parse_args()
 
@@ -180,15 +224,27 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
 
     blocking_findings = [f for f in findings if severity_at_least(severity_of(f), args.threshold)]
     blocked = blocking_enabled and bool(blocking_findings)
+    unanalyzed_languages = [lang for lang in args.unanalyzed_languages.split(",") if lang]
+    fail_on_unanalyzed = args.fail_on_unanalyzed == "true"
 
     if blocked:
+        conclusion = "failure"
+    elif fail_on_unanalyzed and unanalyzed_languages:
+        # A protected branch's required-status-check gate reads this Check
+        # Run's own `conclusion`, not the workflow job's overall pass/fail -
+        # sonar-pr.yml's own "Scan PR head" step already fails the job (see
+        # action.yml's fail-on-unanalyzed-languages), but that alone doesn't
+        # stop a branch rule that requires *this named check* from still
+        # seeing "success" and letting the PR merge.
         conclusion = "failure"
     elif findings:
         conclusion = "neutral"
     else:
         conclusion = "success"
 
-    summary = build_summary(findings, blocking_findings, args.threshold, blocking_enabled)
+    summary = build_summary(
+        findings, blocking_findings, args.threshold, blocking_enabled, unanalyzed_languages, args.baseline_note
+    )
     annotations = [to_annotation(f) for f in findings]
 
     result = {
@@ -199,6 +255,8 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
         "by_severity": counts_by_severity(findings),
         "blocked": blocked,
         "check_run_url": None,
+        "unanalyzed_languages": unanalyzed_languages,
+        "baseline_note": args.baseline_note,
     }
 
     # `finally` runs whether create_check_run() succeeds or raises, so this
