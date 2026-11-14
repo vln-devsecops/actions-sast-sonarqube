@@ -9,7 +9,16 @@ author: vln-devsecops
 
 inputs:
   sonar-host-url:
-    description: Base URL of the running SonarQube instance.
+    description: >-
+      Base URL of the running SonarQube instance, used host-side (polling
+      the compute-engine task, fetching findings). The scanner itself never
+      runs on the host network (see docs/design.md's "Scanner container
+      isolation" section) - left at the default, it instead reaches
+      SonarQube by compose service name on the ephemeral stack's own
+      docker network; changed to anything else, it is passed through to
+      the scanner container unchanged, so it must be reachable from a
+      container on docker's default bridge network (a routable
+      hostname/IP, not "localhost" meaning the host itself).
     required: false
     default: http://localhost:9000
   sonar-token:

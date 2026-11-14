@@ -81,6 +81,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: src
+          persist-credentials: false
 
       # This reusable workflow is meant to be called by other repos, so it
       # can't assume its own composite action (action.yml) is checked out
@@ -117,6 +118,7 @@ jobs:
           repository: ${{ steps.action-source.outputs.repo }}
           ref: ${{ steps.action-source.outputs.ref }}
           path: .sast-sonarqube
+          persist-credentials: false
 
       - name: Raise vm.max_map_count for Elasticsearch
         run: sudo sysctl -w vm.max_map_count=262144

@@ -56,16 +56,16 @@ if [[ -z "$SCANNER_IMAGE" ]]; then
 fi
 echo "Using scanner image: ${SCANNER_IMAGE}"
 
-rm -rf "${ABS_PROJECT_BASE_DIR}/.scannerwork"
-
 # The scanner image runs as a baked-in non-root user (uid 1000) by default,
 # and its home directory (/opt/sonar-scanner/.sonar, where it caches
 # downloads) is owned by that uid. We override --user to match the host's
-# checkout owner so the bind-mounted PROJECT_BASE_DIR is writable - but that
-# means uid 1000's own home directory usually *isn't* writable by whichever
-# uid we end up running as (e.g. GitHub Actions' non-root `runner` user).
-# Give the scanner a dedicated, host-created (so correctly-owned) cache dir
-# instead of letting it fall back to the image's built-in one.
+# checkout owner so uid 1000's own home directory isn't the only writable
+# path available (e.g. GitHub Actions' non-root `runner` user otherwise
+# couldn't write anywhere). Give the scanner a dedicated, host-created (so
+# correctly-owned) cache dir instead of letting it fall back to the image's
+# built-in one. PROJECT_BASE_DIR itself is bind-mounted read-only below (see
+# `:ro` on the docker run below) - the scanner only ever reads it, so its
+# ownership doesn't matter for --user's purposes.
 #
 # Rooted under RUNNER_TEMP, not bare mktemp -d's default of /tmp: this
 # directory gets bind-mounted into the container below and the scanner
@@ -107,35 +107,92 @@ fi
 python3 "$(dirname "${BASH_SOURCE[0]}")/build_scan_config.py" "${build_scan_config_args[@]}"
 readarray -d '' -t EXTRA_SCANNER_ARGS < "$EXTRA_ARGS_FILE"
 
+# Keep the scanner container off the host network entirely (no
+# `--network host`). SONAR_HOST_URL is also used host-side, unchanged,
+# further below (the compute-engine `curl` poll) - SCANNER_SONAR_HOST_URL is
+# a separate, in-container-only value that may differ from it.
+DEFAULT_SONAR_HOST_URL="http://localhost:9000"
+SCANNER_SONAR_HOST_URL="$SONAR_HOST_URL"
+SCANNER_NETWORK_ARGS=()
+
+if [[ "$SONAR_HOST_URL" == "$DEFAULT_SONAR_HOST_URL" ]]; then
+  # SONAR_HOST_URL is still this action's own default, so assume it names
+  # the local ephemeral stack that COMPOSE_FILE (docker-compose.ephemeral.yml)
+  # itself manages, and reach it by compose service name on that stack's
+  # own docker network instead of the host network.
+  #
+  # `docker compose` prefixes network names with the compose project name
+  # (docker-compose.ephemeral.yml's top-level `name:`, normally fixed -
+  # but a caller could still override it via -p/COMPOSE_PROJECT_NAME, e.g.
+  # to run two stacks side by side). Rather than assume that prefix, read
+  # the network's real name back from the running `sonarqube` service
+  # container itself, so this keeps working either way.
+  mapfile -t sonarqube_containers < <(docker compose -f "$COMPOSE_FILE" ps -q sonarqube)
+  if [[ ${#sonarqube_containers[@]} -ne 1 || -z "${sonarqube_containers[0]}" ]]; then
+    echo "Expected exactly one running 'sonarqube' service container for ${COMPOSE_FILE} (SONAR_HOST_URL is this action's default, ${DEFAULT_SONAR_HOST_URL}) - is the ephemeral stack up?" >&2
+    exit 1
+  fi
+  mapfile -t sonarqube_networks < <(docker inspect \
+    -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{println}}{{end}}' \
+    "${sonarqube_containers[0]}")
+  if [[ ${#sonarqube_networks[@]} -ne 1 ]]; then
+    echo "Expected the 'sonarqube' service container to be attached to exactly one docker network, found: ${sonarqube_networks[*]:-none}." >&2
+    exit 1
+  fi
+  SCANNER_NETWORK_ARGS=(--network "${sonarqube_networks[0]}")
+  # "sonarqube" is docker-compose.ephemeral.yml's service name - always
+  # reachable under that name on its own network. 9000 is that service's
+  # own container port, independent of any host-side port mapping.
+  SCANNER_SONAR_HOST_URL="http://sonarqube:9000"
+else
+  # A caller-supplied, non-default sonar-host-url: assume it does not name
+  # this script's own ephemeral stack (which this COMPOSE_FILE may not even
+  # have started), so don't try to join its compose network. The scanner
+  # container still never joins the host network either way - it runs on
+  # docker's default bridge network instead - so this URL must be
+  # reachable from a container on that network (a routable hostname/IP;
+  # not "localhost" meaning the *host* itself, which the scanner container
+  # can no longer reach this way).
+  echo "SONAR_HOST_URL (${SONAR_HOST_URL}) is not this action's default (${DEFAULT_SONAR_HOST_URL}); running the scanner container on the default bridge network rather than joining the ephemeral stack's compose network." >&2
+fi
+
 echo "Scanning ${ABS_PROJECT_BASE_DIR} as project '${PROJECT_KEY}'..."
 docker run --rm \
-  --network host \
+  "${SCANNER_NETWORK_ARGS[@]}" \
   --user "$(id -u):$(id -g)" \
-  -e SONAR_HOST_URL="${SONAR_HOST_URL}" \
+  -e SONAR_HOST_URL="${SCANNER_SONAR_HOST_URL}" \
   -e SONAR_TOKEN="${SONAR_TOKEN}" \
   -e HOME=/tmp \
   -e SONAR_USER_HOME=/tmp/sonar-cache \
-  -v "${ABS_PROJECT_BASE_DIR}:/usr/src" \
+  -v "${ABS_PROJECT_BASE_DIR}:/usr/src:ro" \
   -v "${SCANNER_CACHE_DIR}:/tmp/sonar-cache" \
   -w /usr/src \
   "${SCANNER_IMAGE}" \
   -Dsonar.projectKey="${PROJECT_KEY}" \
   -Dsonar.projectBaseDir=/usr/src \
-  -Dsonar.working.directory=/usr/src/.scannerwork \
+  -Dsonar.working.directory=/tmp/sonar-cache/scannerwork \
   -Dproject.settings="/tmp/sonar-cache/${EMPTY_PROJECT_SETTINGS_NAME}" \
   "${EXTRA_SCANNER_ARGS[@]}"
-  # ^ project.settings: see EMPTY_PROJECT_SETTINGS_NAME above.
-  # sonar.working.directory: the current SonarScanner Engine
-  #   (sonar-scanner-cli 12.x / engine 8.x) defaults this to
-  #   /tmp/.scannerwork inside the container - not a path under
-  #   projectBaseDir - so report-task.txt (read back from the host below)
-  #   would never reach the bind mount without this override.
+  # ^ project mount (:ro): the project is only ever read by the scanner now -
+  #   every path it writes to (sonar.working.directory below, its cache/JRE
+  #   under SONAR_USER_HOME) lives under the separate, writable cache mount
+  #   (SCANNER_CACHE_DIR above) instead.
+  # project.settings: see EMPTY_PROJECT_SETTINGS_NAME above.
+  # sonar.working.directory: moved under /tmp/sonar-cache (the writable
+  #   cache mount) now that /usr/src is read-only. The current SonarScanner
+  #   Engine (sonar-scanner-cli 12.x / engine 8.x) defaults this to
+  #   /tmp/.scannerwork inside the container - not a path under either
+  #   mount - so report-task.txt (read back from the host below, at
+  #   SCANNER_CACHE_DIR/scannerwork/report-task.txt) would never reach a
+  #   host-visible path without this override.
+  # SCANNER_NETWORK_ARGS / SCANNER_SONAR_HOST_URL: see above - keeps the
+  #   scanner off the host network while still reaching SonarQube.
   # EXTRA_SCANNER_ARGS: any -D properties derived from the consumer's
   #   optional .sastrc/.sastignore files (see build_scan_config.py above),
   #   plus -Dsonar.scm.disabled=true when SCM_DISABLED=true - empty when
   #   neither file exists and SCM_DISABLED is unset.
 
-report_task_file="${ABS_PROJECT_BASE_DIR}/.scannerwork/report-task.txt"
+report_task_file="${SCANNER_CACHE_DIR}/scannerwork/report-task.txt"
 if [[ ! -f "$report_task_file" ]]; then
   echo "Scanner did not produce ${report_task_file}." >&2
   exit 1

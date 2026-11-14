@@ -108,6 +108,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           path: src
           fetch-depth: 0
+          persist-credentials: false
 
       # The workspace root holds no checkout of its own, but this
       # workflow's intermediate files still live in a per-job scratch
@@ -119,11 +120,26 @@ jobs:
 
       # git commands below must run inside the caller's own checkout
       # (./src), not the workspace root.
-      - name: Fetch base branch history
+      #
+      # No credentialed `git fetch` here: the checkout above already ran
+      # with fetch-depth: 0, which makes actions/checkout itself fetch
+      # every branch (not just the one ref it checks out) into
+      # refs/remotes/origin/* - see getRefSpecForAllHistory() in
+      # actions/checkout's src/ref-helper.ts, used whenever
+      # settings.fetchDepth <= 0 (src/git-source-provider.ts). So
+      # origin/<BASE_REF> is already present locally; just verify that,
+      # with a clear message if it somehow isn't, rather than fetch again
+      # with a live credential this checkout no longer persists
+      # (persist-credentials: false above).
+      - name: Verify base branch history is available locally
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         working-directory: src
-        run: git fetch origin "$BASE_REF"
+        run: |
+          if ! git rev-parse --verify "origin/${BASE_REF}" >/dev/null 2>&1; then
+            echo "origin/${BASE_REF} was not fetched locally by the checkout above (expected fetch-depth: 0 to have fetched every branch into refs/remotes/origin/*)." >&2
+            exit 1
+          fi
 
       - name: Resolve merge-base and target HEAD
         id: refs
@@ -189,6 +205,7 @@ jobs:
           repository: ${{ steps.action-source.outputs.repo }}
           ref: ${{ steps.action-source.outputs.ref }}
           path: .sast-sonarqube
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -253,6 +270,7 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           path: .baseline-checkout
           fetch-depth: ${{ inputs.baseline-scm-history && 0 || 1 }}
+          persist-credentials: false
 
       # project-base-dir might not exist yet on the target branch at all -
       # e.g. this PR is the one introducing it. That's not a misconfiguration
