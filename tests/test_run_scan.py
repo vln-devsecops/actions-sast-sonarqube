@@ -31,9 +31,20 @@ if [[ "$1" == "compose" ]]; then
   exit 0
 fi
 if [[ "$1" == "inspect" ]]; then
+  # Mirrors the real `docker inspect -f '{{json .NetworkSettings.Networks}}'`
+  # output (a JSON object keyed by network name) rather than a plain list of
+  # names, since run_scan.sh pipes this through a real `jq -r 'keys[]'` -
+  # not a stubbed one - to extract them.
   # FAKE_SONAR_NETWORKS: whitespace-separated network names the inspected
   # container is attached to (default: exactly one).
-  printf '%s\\n' ${FAKE_SONAR_NETWORKS:-fake-project_sonar-ephemeral}
+  json="{"
+  first=true
+  for net in ${FAKE_SONAR_NETWORKS:-fake-project_sonar-ephemeral}; do
+    if [[ "$first" == true ]]; then first=false; else json+=","; fi
+    json+="\\"${net}\\":{}"
+  done
+  json+="}"
+  echo "$json"
   exit 0
 fi
 # Record what the scanner would find at the forced project.settings path,

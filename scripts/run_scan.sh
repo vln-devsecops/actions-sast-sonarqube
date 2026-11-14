@@ -132,9 +132,14 @@ if [[ "$SONAR_HOST_URL" == "$DEFAULT_SONAR_HOST_URL" ]]; then
     echo "Expected exactly one running 'sonarqube' service container for ${COMPOSE_FILE} (SONAR_HOST_URL is this action's default, ${DEFAULT_SONAR_HOST_URL}) - is the ephemeral stack up?" >&2
     exit 1
   fi
+  # Via `{{json ...}} | jq`, not a hand-rolled `{{range}}` template: `docker
+  # inspect -f` appends its own trailing newline after whatever the
+  # template itself prints, so a `{{println}}`-terminated range emits one
+  # trailing blank line *in addition to* one line per network - silently
+  # inflating a single-network result to two mapfile elements. jq's own
+  # `keys[]` output has no such extra line.
   mapfile -t sonarqube_networks < <(docker inspect \
-    -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{println}}{{end}}' \
-    "${sonarqube_containers[0]}")
+    -f '{{json .NetworkSettings.Networks}}' "${sonarqube_containers[0]}" | jq -r 'keys[]')
   if [[ ${#sonarqube_networks[@]} -ne 1 ]]; then
     echo "Expected the 'sonarqube' service container to be attached to exactly one docker network, found: ${sonarqube_networks[*]:-none}." >&2
     exit 1
