@@ -30,9 +30,13 @@ import sys
 # is the specific sub-case of "end failed" that IS a build-failure reason,
 # so a bare end-failed is left as "not a build failure"), scanner-install-failed,
 # no-report-task, ce-task-failed, ce-task-timeout, invalid-sast-config,
-# build-command-required/-not-allowed, invalid-scanner-mode,
-# project-base-dir-missing, scanner-failed (cli mode has no fallback-build
-# concept at all), and check-failed - that one specifically means
+# build-command-required, build-command-not-allowed, invalid-scanner-mode,
+# project-base-dir-missing, workspace-inaccessible,
+# project-base-dir-outside-workspace (configuration or layout errors, not
+# the target branch's build), invalid-sast-config (also set when a config
+# file is rejected on detection's re-read after the build - a rejected
+# config is never "the base doesn't build"), scanner-failed (cli mode has
+# no fallback-build concept at all), and check-failed - that one specifically means
 # check_dotnet_projects.py itself crashed before reaching a verdict (see
 # run_scan.sh's "No reason written: the check itself crashed" branch), which
 # is evidence the CHECK is broken, not evidence about whether the target

@@ -286,7 +286,10 @@ action removes `SONAR_TOKEN` from `build-command`'s environment, but that
 is hygiene, not a boundary: the token is still in the parent process's
 environment (`/proc/$PPID/environ`) and on `end`'s command line. With it,
 build code can, for example, mark its own issues resolved on the
-ephemeral server. So `dotnet` mode can't defend the gate against an
+ephemeral server. The build also runs with write access to the whole
+workspace, so it can modify this action's own scripts (`.sast-sonarqube`)
+that later steps in the same job run; that is covered by the same trust
+model, under which fork PRs need a maintainer dispatch. So `dotnet` mode can't defend the gate against an
 untrusted author within one job:
 
 - Run it automatically only for PRs from branches in the same repository
@@ -301,17 +304,22 @@ untrusted author within one job:
   `GITHUB_TOKEN` from `.git/config`.
 - Both reusable workflows check the caller's code out into `src`, with
   this action's own source (`.sast-sonarqube`) and the fallback baseline
-  (`.baseline-checkout`) as siblings - never under the scanned directory,
-  and never wiped or replaced by the PR's checkout. Each fixed checkout
+  (`.baseline-checkout`) as siblings, never under the scanned directory.
+  So the `actions/checkout` step for the PR can't wipe or replace them, and
+  no PR-committed `.sast-sonarqube` is ever used. (This is about the
+  checkout step only: in `dotnet` mode the build itself can still write to
+  them - see above.) Each fixed checkout
   path is cleared right before it is checked out, and every intermediate
   file a trusted step writes (`changed-files.txt`, `new-findings.json`,
   `policy-result.json`, the extracted baseline artifact, ...) goes under
   `${RUNNER_TEMP}/sonar-pr/` instead of the workspace.
   `tests/test_workflow_hardening.py` enforces this layout, the
   checkout-clearing pattern, `persist-credentials: false`, the fork-PR
-  gate's step order and `if:` conditions, and flags shell redirects, `tee`,
-  and output flags in `run:` blocks that bypass `$RUNNER_TEMP`; other write
-  forms need manual review.
+  gate's step order and `if:` conditions, that no workflow step after the
+  `.sast-sonarqube` checkout modifies it, and flags shell redirects, `tee`,
+  `cp`/`mv`, `-o` and output flags in `run:` blocks (following local
+  variables) that bypass `$RUNNER_TEMP`; other write forms need manual
+  review.
 
 #### Fork PRs in `scanner-mode: dotnet`
 
