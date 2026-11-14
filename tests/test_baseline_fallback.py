@@ -1,3 +1,6 @@
+import re
+from pathlib import Path
+
 import pytest
 
 from baseline_fallback import BUILD_FAILURE_REASONS, is_build_failure_reason
@@ -25,6 +28,8 @@ def test_build_failure_reasons_are_classified_as_build_failures(reason):
         "build-command-not-allowed",
         "invalid-scanner-mode",
         "project-base-dir-missing",
+        "project-base-dir-outside-workspace",
+        "workspace-inaccessible",
         "scanner-failed",
         "check-failed",
     ],
@@ -54,3 +59,16 @@ def test_every_build_failure_reason_is_a_real_run_scan_failure_reason_code():
         "project-not-built",
         "project-not-analyzed",
     }
+
+
+def test_every_run_scan_failure_reason_is_classified_in_the_module_comment():
+    """Every code run_scan.sh can set is either a build-failure reason or
+    named in baseline_fallback.py's "Deliberately NOT included" comment, so
+    a new code (e.g. #55's workspace checks) is a conscious decision here,
+    not an accident of the default."""
+    root = Path(__file__).resolve().parent.parent
+    reasons = set(re.findall(r'^\s*fail ([a-z][a-z-]+) "', (root / "scripts" / "run_scan.sh").read_text(), re.M))
+    source = (root / "scripts" / "baseline_fallback.py").read_text()
+    comment = source[source.index("# Reason codes from run_scan.sh") : source.index("BUILD_FAILURE_REASONS = ")]
+    unclassified = sorted(r for r in reasons - BUILD_FAILURE_REASONS if r not in comment)
+    assert unclassified == []

