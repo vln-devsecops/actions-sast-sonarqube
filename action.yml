@@ -154,12 +154,18 @@ outputs:
   failure-reason:
     description: >-
       Empty on success. When the scan step fails, a fixed reason code naming
-      why, e.g. build-command-failed, begin-failed, end-failed,
-      no-analyzable-projects, project-not-built, project-not-analyzed,
-      build-command-required, invalid-sast-config, no-report-task,
-      ce-task-failed (see scripts/run_scan.sh's `fail` calls). Also written
-      to the job summary. Lets a caller tell an intended block from a setup
-      error.
+      why (see scripts/run_scan.sh's `fail` calls). Input and setup:
+      invalid-scanner-mode, build-command-required,
+      build-command-not-allowed, project-base-dir-missing,
+      workspace-inaccessible, project-base-dir-outside-workspace (resolves
+      outside GITHUB_WORKSPACE), invalid-sast-config (a .sastrc,
+      .sastignore or sonar-project.properties rejected - before the scan,
+      or when detection re-reads them after it). dotnet mode:
+      scanner-install-failed, begin-failed, build-command-failed,
+      end-failed, no-analyzable-projects, check-failed, project-not-built,
+      project-not-analyzed. cli mode: scanner-failed. Either mode:
+      no-report-task, ce-task-failed, ce-task-timeout. Also written to the
+      job summary. Lets a caller tell an intended block from a setup error.
     value: ${{ steps.scan.outputs.failure-reason }}
 
 runs:

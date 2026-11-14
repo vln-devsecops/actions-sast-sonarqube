@@ -894,6 +894,46 @@ def test_refuses_symlinked_config_file_before_starting_scanner(ws_env):
     assert _ws_docker_run_calls(ws_env) == []
 
 
+# A config file that passed build_scan_config.py's checks before the scan
+# can still be swapped for a symbolic link by the time detection reads it
+# again afterwards. Detection then refuses it (read_config_file), and
+# run_scan.sh must report that as a rejected SAST config, not just die.
+WS_SWAPPING_DOCKER = """#!/usr/bin/env bash
+if [[ "$1" == "compose" ]]; then
+  echo "sonarsource/sonar-scanner-cli:test"
+  exit 0
+fi
+for arg in "$@"; do
+  if [[ "$arg" == *:/usr/src ]]; then
+    src="${arg%:/usr/src}"
+    rm -f "$src/.sastignore"
+    ln -s "$SWAP_TARGET" "$src/.sastignore"
+  fi
+done
+exit 0
+"""
+
+
+def test_detection_rejecting_a_swapped_config_file_is_reported(ws_env):
+    docker = Path(ws_env["vars"]["PATH"].split(os.pathsep)[0]) / "docker"
+    docker.write_text(WS_SWAPPING_DOCKER)
+    project = ws_env["workspace"] / "app"
+    project.mkdir()
+    (project / ".sastignore").write_text("*.log\n")
+    outside = ws_env["tmp"] / "outside.txt"
+    outside.write_text("UNIQUE-CONTENT-MARKER-9c1e\n")
+    ws_env["vars"]["SWAP_TARGET"] = str(outside)
+    github_output = ws_env["tmp"] / "github_output"
+    github_output.write_text("")
+    ws_env["vars"]["GITHUB_OUTPUT"] = str(github_output)
+    proc = _ws_run(ws_env, "app", ws_env["workspace"])
+    assert proc.returncode != 0
+    assert "symbolic link" in proc.stderr
+    assert "Rejected the SAST config while detecting unanalyzed languages" in proc.stderr
+    assert "UNIQUE-CONTENT-MARKER-9c1e" not in proc.stdout + proc.stderr
+    assert "unanalyzed-languages=" not in github_output.read_text()
+
+
 # --- dotnet mode: #55 workspace confinement and #57 properties -------------------
 
 
@@ -960,3 +1000,50 @@ def test_dotnet_refuses_symlinked_sastrc_before_begin(harness):
     assert "symbolic link" in result.stderr
     assert _output(harness, "failure-reason") == "invalid-sast-config"
     assert harness.args("scanner-begin.args") is None
+
+
+def test_detection_rejecting_a_swapped_config_file_sets_failure_reason(ws_env):
+    docker = Path(ws_env["vars"]["PATH"].split(os.pathsep)[0]) / "docker"
+    docker.write_text(WS_SWAPPING_DOCKER)
+    project = ws_env["workspace"] / "app"
+    project.mkdir()
+    (project / ".sastignore").write_text("*.log\n")
+    outside = ws_env["tmp"] / "outside.txt"
+    outside.write_text("x\n")
+    ws_env["vars"]["SWAP_TARGET"] = str(outside)
+    github_output = ws_env["tmp"] / "github_output"
+    github_output.write_text("")
+    ws_env["vars"]["GITHUB_OUTPUT"] = str(github_output)
+    proc = _ws_run(ws_env, "app", ws_env["workspace"])
+    assert proc.returncode != 0
+    assert "failure-reason=invalid-sast-config" in github_output.read_text().splitlines()
+
+
+def test_dotnet_build_swapping_a_config_file_fails_with_invalid_sast_config(harness):
+    # build-command runs between build_scan_config.py's read and detection's
+    # re-read: a build that turns .sastignore into a symbolic link must not
+    # make detection silently drop the consumer's exclusions.
+    (harness.project / ".sastignore").write_text("Generated/\n")
+    outside = harness.tmp_path / "outside.txt"
+    outside.write_text("x\n")
+    result = _dotnet(
+        harness,
+        BUILD_COMMAND=f"rm -f .sastignore && ln -s {outside} .sastignore",
+    )
+    assert result.returncode != 0
+    assert "symbolic link" in result.stderr
+    assert _output(harness, "failure-reason") == "invalid-sast-config"
+    assert _output(harness, "unanalyzed-languages") is None
+
+
+def test_action_documents_every_failure_reason_run_scan_can_set():
+    import yaml
+
+    script = RUN_SCAN.read_text()
+    reasons = set(re.findall(r'^\s*fail ([a-z][a-z-]+) "', script, re.M))
+    # `fail "$reason"` forwards check_dotnet_projects.py's own codes.
+    assert {"project-base-dir-outside-workspace", "invalid-sast-config"} <= reasons
+    action = yaml.safe_load((REPO_ROOT / "action.yml").read_text())
+    description = action["outputs"]["failure-reason"]["description"]
+    missing = sorted(r for r in reasons if r not in description)
+    assert missing == [], f"action.yml failure-reason description is missing: {missing}"
