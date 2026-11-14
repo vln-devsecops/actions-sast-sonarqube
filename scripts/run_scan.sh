@@ -315,58 +315,97 @@ scan_with_cli() {
 
   rm -rf "${ABS_PROJECT_BASE_DIR}/.scannerwork"
 
-  # Keep the scanner container off the host network entirely (no
-  # `--network host`). SONAR_HOST_URL is also used host-side, unchanged,
-  # further below (the compute-engine `curl` poll) - SCANNER_SONAR_HOST_URL
-  # is a separate, in-container-only value that may differ from it.
+  # Keep the scanner container off the host network when this script's own
+  # ephemeral stack (docker-compose.ephemeral.yml, via COMPOSE_FILE) can be
+  # found running - joining its compose network instead and reaching
+  # SonarQube by compose service name. `--network host` is kept as an
+  # explicit, deprecated FALLBACK (not an error) for two cases v1 callers
+  # already rely on: a non-default sonar-host-url (pointing at *some*
+  # SonarQube, not necessarily this script's own compose stack), and the
+  # default URL with no compose stack this script itself can find (e.g. a
+  # bare `docker run -p 9000:9000 sonarqube`, see docs/design.md). A real
+  # lookup error once the compose container IS found - present but not
+  # running, or on other than exactly one network - fails closed instead
+  # of silently falling back, since that's evidence something about the
+  # lookup itself is broken, not evidence there's no compose stack at all.
+  #
+  # SONAR_HOST_URL is also used host-side, unchanged, further below (the
+  # compute-engine `curl` poll) - SCANNER_SONAR_HOST_URL is a separate,
+  # in-container-only value that may differ from it.
   DEFAULT_SONAR_HOST_URL="http://localhost:9000"
   SCANNER_SONAR_HOST_URL="$SONAR_HOST_URL"
-  SCANNER_NETWORK_ARGS=()
+  SCANNER_NETWORK_ARGS=(--network host)
+  USE_HOST_NETWORK=true
 
   if [[ "$SONAR_HOST_URL" == "$DEFAULT_SONAR_HOST_URL" ]]; then
-    # SONAR_HOST_URL is still this action's own default, so assume it names
-    # the local ephemeral stack that COMPOSE_FILE (docker-compose.ephemeral.yml)
-    # itself manages, and reach it by compose service name on that stack's
-    # own docker network instead of the host network.
-    #
     # `docker compose` prefixes network names with the compose project name
     # (docker-compose.ephemeral.yml's top-level `name:`, normally fixed -
-    # but a caller could still override it via -p/COMPOSE_PROJECT_NAME, e.g.
-    # to run two stacks side by side). Rather than assume that prefix, read
-    # the network's real name back from the running `sonarqube` service
-    # container itself, so this keeps working either way.
-    mapfile -t sonarqube_containers < <(docker compose -f "$COMPOSE_FILE" ps -q sonarqube)
-    if [[ ${#sonarqube_containers[@]} -ne 1 || -z "${sonarqube_containers[0]}" ]]; then
-      echo "Expected exactly one running 'sonarqube' service container for ${COMPOSE_FILE} (SONAR_HOST_URL is this action's default, ${DEFAULT_SONAR_HOST_URL}) - is the ephemeral stack up?" >&2
-      exit 1
+    # but a caller could still override it via -p/COMPOSE_PROJECT_NAME).
+    # Rather than assume that prefix, read the network's real name back
+    # from the running `sonarqube` service container itself - this also
+    # means the lookup below only follows a -p/COMPOSE_PROJECT_NAME
+    # override when it's exported into THIS step's own environment, not
+    # only passed to a separate `docker compose up` invocation earlier:
+    # `docker compose` resolves the project name from its own environment
+    # independently each time it runs, so without that same override
+    # present here, this lookup resolves a different project name than
+    # the stack actually started under - normally finding no container at
+    # all (falls back to --network host below, see docs/design.md), but
+    # finding and failing closed on some unrelated container instead if
+    # one happens to exist under the name this lookup resolves to.
+    #
+    # `ps -a -q` (not plain `ps -q`, which silently omits a stopped
+    # container): "no container at all" and "a container that exists but
+    # isn't running" need to be told apart below - the first is this
+    # script's own fallback case, the second is the fail-closed case.
+    mapfile -t sonarqube_containers < <(docker compose -f "$COMPOSE_FILE" ps -a -q sonarqube)
+    # A real "no matching container" prints nothing at all (zero lines).
+    # A single blank line (one empty-string element) means the same thing
+    # in practice (no container id to act on) - fold it into the same
+    # "not found" case rather than treating it as a found-but-unusable id.
+    if [[ ${#sonarqube_containers[@]} -eq 1 && -z "${sonarqube_containers[0]}" ]]; then
+      sonarqube_containers=()
     fi
-    # Via `{{json ...}} | jq`, not a hand-rolled `{{range}}` template:
-    # `docker inspect -f` appends its own trailing newline after whatever
-    # the template itself prints, so a `{{println}}`-terminated range
-    # emits one trailing blank line *in addition to* one line per network -
-    # silently inflating a single-network result to two mapfile elements.
-    # jq's own `keys[]` output has no such extra line.
-    mapfile -t sonarqube_networks < <(docker inspect \
-      -f '{{json .NetworkSettings.Networks}}' "${sonarqube_containers[0]}" | jq -r 'keys[]')
-    if [[ ${#sonarqube_networks[@]} -ne 1 ]]; then
-      echo "Expected the 'sonarqube' service container to be attached to exactly one docker network, found: ${sonarqube_networks[*]:-none}." >&2
-      exit 1
-    fi
-    SCANNER_NETWORK_ARGS=(--network "${sonarqube_networks[0]}")
-    # "sonarqube" is docker-compose.ephemeral.yml's service name - always
-    # reachable under that name on its own network. 9000 is that service's
-    # own container port, independent of any host-side port mapping.
-    SCANNER_SONAR_HOST_URL="http://sonarqube:9000"
-  else
-    # A caller-supplied, non-default sonar-host-url: assume it does not name
-    # this script's own ephemeral stack (which this COMPOSE_FILE may not even
-    # have started), so don't try to join its compose network. The scanner
-    # container still never joins the host network either way - it runs on
-    # docker's default bridge network instead - so this URL must be
-    # reachable from a container on that network (a routable hostname/IP;
-    # not "localhost" meaning the *host* itself, which the scanner container
-    # can no longer reach this way).
-    echo "SONAR_HOST_URL (${SONAR_HOST_URL}) is not this action's default (${DEFAULT_SONAR_HOST_URL}); running the scanner container on the default bridge network rather than joining the ephemeral stack's compose network." >&2
+    case "${#sonarqube_containers[@]}" in
+      0)
+        # No compose container at all for this COMPOSE_FILE: not this
+        # script's own ephemeral stack (never started, or SonarQube
+        # reached some other way under the same default URL) - fall back
+        # to the host network below, same as a non-default sonar-host-url.
+        ;;
+      1)
+        sonarqube_status="$(docker inspect -f '{{.State.Status}}' "${sonarqube_containers[0]}")"
+        if [[ "$sonarqube_status" != "running" ]]; then
+          fail sonarqube-service-not-running "The compose 'sonarqube' service container for ${COMPOSE_FILE} exists but is not running (status: ${sonarqube_status})."
+        fi
+        # Via `{{json ...}} | jq`, not a hand-rolled `{{range}}` template:
+        # `docker inspect -f` appends its own trailing newline after
+        # whatever the template itself prints, so a
+        # `{{println}}`-terminated range emits one trailing blank line *in
+        # addition to* one line per network - silently inflating a
+        # single-network result to two mapfile elements. jq's own
+        # `keys[]` output has no such extra line.
+        mapfile -t sonarqube_networks < <(docker inspect \
+          -f '{{json .NetworkSettings.Networks}}' "${sonarqube_containers[0]}" | jq -r 'keys[]')
+        if [[ ${#sonarqube_networks[@]} -ne 1 ]]; then
+          fail sonarqube-network-ambiguous "Expected the running compose 'sonarqube' service container to be attached to exactly one docker network, found: ${sonarqube_networks[*]:-none}."
+        fi
+        SCANNER_NETWORK_ARGS=(--network "${sonarqube_networks[0]}")
+        USE_HOST_NETWORK=false
+        # "sonarqube" is docker-compose.ephemeral.yml's service name -
+        # always reachable under that name on its own network. 9000 is
+        # that service's own container port, independent of any host-side
+        # port mapping.
+        SCANNER_SONAR_HOST_URL="http://sonarqube:9000"
+        ;;
+      *)
+        fail sonarqube-service-ambiguous "Found ${#sonarqube_containers[@]} containers for the compose 'sonarqube' service for ${COMPOSE_FILE}, expected at most one."
+        ;;
+    esac
+  fi
+
+  if [[ "$USE_HOST_NETWORK" == "true" ]]; then
+    echo "::warning::Running the scanner container on the host network is deprecated and will be removed in a future major version. To avoid this, use this action's own compose stack (docker-compose.ephemeral.yml) and leave sonar-host-url at its default (${DEFAULT_SONAR_HOST_URL}), so the scanner can join its network instead."
   fi
 
   echo "Scanning ${ABS_PROJECT_BASE_DIR} as project '${PROJECT_KEY}'..."

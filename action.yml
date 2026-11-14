@@ -172,9 +172,19 @@ outputs:
       or when detection re-reads them after it). dotnet mode:
       scanner-install-failed, begin-failed, build-command-failed,
       end-failed, no-analyzable-projects, check-failed, project-not-built,
-      project-not-analyzed. cli mode: scanner-failed. Either mode:
-      no-report-task, ce-task-failed, ce-task-timeout. Also written to the
-      job summary. Lets a caller tell an intended block from a setup error.
+      project-not-analyzed. cli mode: scanner-failed,
+      sonarqube-service-not-running (the compose "sonarqube" service
+      container exists but isn't running - the default sonar-host-url's
+      network lookup found it ambiguous rather than simply absent),
+      sonarqube-network-ambiguous (that container is attached to other
+      than exactly one docker network), sonarqube-service-ambiguous (more
+      than one container matched the compose "sonarqube" service). None of
+      these three fire when no compose container is found at all, or when
+      sonar-host-url isn't the default - the scanner falls back to the
+      host network instead (a deprecation warning, not a failure); see
+      docs/design.md. Either mode: no-report-task, ce-task-failed,
+      ce-task-timeout. Also written to the job summary. Lets a caller tell
+      an intended block from a setup error.
     value: ${{ steps.scan.outputs.failure-reason }}
 
 runs:
