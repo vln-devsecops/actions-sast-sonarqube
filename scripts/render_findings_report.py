@@ -32,8 +32,28 @@ def _escape_for_table_cell(text):
     return (text or "").replace("|", "\\|").replace("\n", " ").strip()
 
 
-def render_report(findings, project_key):
+def render_unanalyzed_languages_banner(unanalyzed_languages):
+    """A `cli`-mode scan must never present a clean result for files it
+    didn't analyze (see detect_unanalyzed_languages.py) - render this at
+    the very top of the report, above the findings table, so it can't be
+    missed. Returns "" (no banner at all) when the list is empty."""
+    if not unanalyzed_languages:
+        return ""
+    return (
+        f"> **Not analyzed:** {', '.join(unanalyzed_languages)}. "
+        "sonar-scanner-cli cannot analyze these languages - these files "
+        "were NOT analyzed, so the absence of findings in this report says "
+        "nothing about them."
+    )
+
+
+def render_report(findings, project_key, unanalyzed_languages=None):
     lines = [f"# SAST SonarQube findings report - `{project_key}`", ""]
+
+    banner = render_unanalyzed_languages_banner(unanalyzed_languages)
+    if banner:
+        lines.append(banner)
+        lines.append("")
 
     if not findings:
         lines.append("No findings.")
@@ -59,13 +79,19 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--findings", required=True, help="Path to a normalized findings JSON file (fetch_findings.py's schema)")
     parser.add_argument("--project-key", required=True)
+    parser.add_argument(
+        "--unanalyzed-languages",
+        default="",
+        help="Comma-separated list of languages this scan could not analyze (see detect_unanalyzed_languages.py); empty when none",
+    )
     parser.add_argument("--out", required=True, help="Path to write the Markdown report to")
     args = parser.parse_args()
 
     with open(args.findings) as f:
         findings = json.load(f)
 
-    report = render_report(findings, args.project_key)
+    unanalyzed_languages = [lang for lang in args.unanalyzed_languages.split(",") if lang]
+    report = render_report(findings, args.project_key, unanalyzed_languages)
 
     with open(args.out, "w") as f:
         f.write(report)

@@ -80,3 +80,41 @@ def test_render_report_sorts_unrecognized_severity_last_not_first():
 def test_render_report_handles_missing_fields_without_crashing():
     report = render_report([{}], "p")
     assert "| Issue |" in report
+
+
+def test_render_report_no_banner_when_no_unanalyzed_languages():
+    report = render_report([], "p", unanalyzed_languages=[])
+    assert "Not analyzed" not in report
+
+
+def test_render_report_no_banner_when_unanalyzed_languages_omitted():
+    report = render_report([], "p")
+    assert "Not analyzed" not in report
+
+
+def test_render_report_shows_unanalyzed_languages_banner():
+    report = render_report([], "p", unanalyzed_languages=["C#", "VB.NET"])
+    assert "Not analyzed" in report
+    assert "C#" in report
+    assert "VB.NET" in report
+
+
+def test_render_report_banner_says_findings_say_nothing_about_them():
+    """Wording must say plainly these files were NOT analyzed, so the
+    absence of findings says nothing about them - not just name the
+    languages."""
+    report = render_report([], "p", unanalyzed_languages=["C#"])
+    assert "not analyzed" in report.lower()
+    assert "says nothing" in report.lower() or "say nothing" in report.lower()
+
+
+def test_render_report_banner_appears_before_the_findings_table():
+    findings = [make_finding()]
+    report = render_report(findings, "p", unanalyzed_languages=["Swift"])
+    assert report.index("Not analyzed") < report.index("| Severity |")
+
+
+def test_render_report_banner_appears_with_no_findings_too():
+    report = render_report([], "p", unanalyzed_languages=["Swift"])
+    assert "Not analyzed" in report
+    assert "No findings." in report

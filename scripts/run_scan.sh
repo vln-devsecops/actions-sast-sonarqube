@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Run sonar-scanner-cli against PROJECT_BASE_DIR and wait for the resulting
-# SonarQube background compute-engine task to finish.
+# SonarQube background compute-engine task to finish. Also detects
+# languages this `cli`-mode scan didn't actually analyze (see
+# detect_unanalyzed_languages.py) and writes an `unanalyzed-languages`
+# step output, so a clean scan result is never presented for files that
+# were never analyzed in the first place.
 #
 # Required env: SONAR_HOST_URL, SONAR_TOKEN, PROJECT_KEY, PROJECT_BASE_DIR,
 #                COMPOSE_FILE (path to docker-compose.ephemeral.yml, used only
@@ -78,8 +82,16 @@ rm -rf "${ABS_PROJECT_BASE_DIR}/.scannerwork"
 # executable; falling back to /tmp keeps this script working unchanged
 # outside Actions (e.g. a manual local run), where that risk doesn't apply.
 SCANNER_CACHE_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/sonar-scanner-cache.XXXXXX")"
-EXTRA_ARGS_FILE="$(mktemp)"
-trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}"' EXIT
+# EXTRA_ARGS_FILE/SCANNER_LOG_FILE/UNANALYZED_LANGUAGES_FILE are plain text
+# (no exec involved, unlike SCANNER_CACHE_DIR's bundled-JRE concern above),
+# but rooted under the same RUNNER_TEMP-not-bare-/tmp scratch root anyway:
+# a locked-down runner is free to make /tmp unwritable too, not just
+# noexec, and keeping every scratch file this script creates under one
+# root avoids depending on /tmp being usable at all.
+EXTRA_ARGS_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/sonar-extra-args.XXXXXX")"
+SCANNER_LOG_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/sonar-scanner-log.XXXXXX")"
+UNANALYZED_LANGUAGES_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/sonar-unanalyzed-languages.XXXXXX")"
+trap 'rm -rf "${SCANNER_CACHE_DIR}"; rm -f "${EXTRA_ARGS_FILE}" "${SCANNER_LOG_FILE}" "${UNANALYZED_LANGUAGES_FILE}"' EXIT
 
 # The scanner would otherwise load sonar-project.properties from the
 # project directory by itself, with every key in it applied. Point its
@@ -123,7 +135,8 @@ docker run --rm \
   -Dsonar.projectBaseDir=/usr/src \
   -Dsonar.working.directory=/usr/src/.scannerwork \
   -Dproject.settings="/tmp/sonar-cache/${EMPTY_PROJECT_SETTINGS_NAME}" \
-  "${EXTRA_SCANNER_ARGS[@]}"
+  "${EXTRA_SCANNER_ARGS[@]}" \
+  2>&1 | tee "$SCANNER_LOG_FILE"
   # ^ project.settings: see EMPTY_PROJECT_SETTINGS_NAME above.
   # sonar.working.directory: the current SonarScanner Engine
   #   (sonar-scanner-cli 12.x / engine 8.x) defaults this to
@@ -134,6 +147,43 @@ docker run --rm \
   #   optional .sastrc/.sastignore files (see build_scan_config.py above),
   #   plus -Dsonar.scm.disabled=true when SCM_DISABLED=true - empty when
   #   neither file exists and SCM_DISABLED is unset.
+  # tee SCANNER_LOG_FILE: the plain CLI never analyzes C#/VB.NET (indexes
+  #   the files, runs no rules) and instead logs a fixed WARN line naming
+  #   the language - see detect_unanalyzed_languages.py. `tee` still
+  #   streams the scanner's output live to the job log while also
+  #   capturing it to a file this script can grep after the fact; `set -o
+  #   pipefail` above (part of `set -euo pipefail`) is what keeps `docker
+  #   run`'s own exit status - not tee's - the one that can fail this
+  #   script, same as before this feature existed.
+
+# Detect languages this scan didn't actually analyze - either because the
+# plain CLI indexed but couldn't analyze them (from the scanner's own log
+# line above) or because they have no Community Build plugin at all, so
+# the scanner never even logs about them (from a file-extension scan of
+# PROJECT_BASE_DIR instead - see detect_unanalyzed_languages.py). Finding
+# unanalyzed languages never fails the scan itself: it only produces a
+# result that action.yml surfaces (warning annotation, job summary, report
+# banner, Check Run/comment, and the fail-on-unanalyzed-languages input)
+# after the findings and report outputs further downstream are written.
+# Detection does fail the scan if it can't read .sastrc/.sastignore safely:
+# it re-reads them through read_config_file(), and a file that has become a
+# symbolic link (or otherwise invalid) since build_scan_config.py read it
+# is rejected the same way, rather than silently detecting without the
+# consumer's exclusions.
+if ! python3 "$(dirname "${BASH_SOURCE[0]}")/detect_unanalyzed_languages.py" \
+  --scanner-log "$SCANNER_LOG_FILE" \
+  --project-base-dir "$ABS_PROJECT_BASE_DIR" \
+  --config "$SAST_CONFIG_FILE" \
+  --ignore-file "$SAST_IGNORE_FILE" \
+  --config-base-dir "$PROJECT_BASE_DIR" \
+  --out "$UNANALYZED_LANGUAGES_FILE"; then
+  echo "Rejected the SAST config while detecting unanalyzed languages (see the error above)." >&2
+  exit 1
+fi
+UNANALYZED_LANGUAGES="$(cat "$UNANALYZED_LANGUAGES_FILE")"
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  echo "unanalyzed-languages=${UNANALYZED_LANGUAGES}" >> "$GITHUB_OUTPUT"
+fi
 
 report_task_file="${ABS_PROJECT_BASE_DIR}/.scannerwork/report-task.txt"
 if [[ ! -f "$report_task_file" ]]; then

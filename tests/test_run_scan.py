@@ -238,3 +238,43 @@ def test_refuses_symlinked_config_file_before_starting_scanner(env):
     assert proc.returncode != 0
     assert "UNIQUE-CONTENT-MARKER-7f3a" not in proc.stdout + proc.stderr
     assert _docker_run_calls(env) == []
+
+
+# A config file that passed build_scan_config.py's checks before the scan
+# can still be swapped for a symbolic link by the time detection reads it
+# again afterwards. Detection then refuses it (read_config_file), and
+# run_scan.sh must report that as a rejected SAST config, not just die.
+SWAPPING_DOCKER = """#!/usr/bin/env bash
+if [[ "$1" == "compose" ]]; then
+  echo "sonarsource/sonar-scanner-cli:test"
+  exit 0
+fi
+for arg in "$@"; do
+  if [[ "$arg" == *:/usr/src ]]; then
+    src="${arg%:/usr/src}"
+    rm -f "$src/.sastignore"
+    ln -s "$SWAP_TARGET" "$src/.sastignore"
+  fi
+done
+exit 0
+"""
+
+
+def test_detection_rejecting_a_swapped_config_file_is_reported(env):
+    docker = Path(env["vars"]["PATH"].split(os.pathsep)[0]) / "docker"
+    docker.write_text(SWAPPING_DOCKER)
+    project = env["workspace"] / "app"
+    project.mkdir()
+    (project / ".sastignore").write_text("*.log\n")
+    outside = env["tmp"] / "outside.txt"
+    outside.write_text("UNIQUE-CONTENT-MARKER-9c1e\n")
+    env["vars"]["SWAP_TARGET"] = str(outside)
+    github_output = env["tmp"] / "github_output"
+    github_output.write_text("")
+    env["vars"]["GITHUB_OUTPUT"] = str(github_output)
+    proc = _run(env, "app", env["workspace"])
+    assert proc.returncode != 0
+    assert "symbolic link" in proc.stderr
+    assert "Rejected the SAST config while detecting unanalyzed languages" in proc.stderr
+    assert "UNIQUE-CONTENT-MARKER-9c1e" not in proc.stdout + proc.stderr
+    assert "unanalyzed-languages=" not in github_output.read_text()

@@ -50,6 +50,22 @@ inputs:
       checkout that has full git history available.
     required: false
     default: "false"
+  fail-on-unanalyzed-languages:
+    description: >-
+      Set "true" to fail this action when project-base-dir contains files in
+      a language the plain sonar-scanner-cli can't analyze (C#, VB.NET - not
+      covered without the Scanner for .NET; C, C++, Objective-C, Swift - no
+      Community Build plugin at all; see scripts/detect_unanalyzed_languages.py
+      and the unanalyzed-languages output below). The findings-json and
+      findings-report outputs are still produced first, so callers that read
+      them with `if: always()` still get a result. Default "false": warn
+      only (::warning:: annotation, job summary, a banner in the findings
+      report, and - from sonar-pr.yml - the Check Run summary and PR
+      comment), so a clean result is never shown silently, without yet
+      failing existing @v1 callers that have incidental files in one of
+      these languages.
+    required: false
+    default: "false"
 
 outputs:
   findings-json:
@@ -64,6 +80,14 @@ outputs:
       detail; callers are expected to upload this as a build artifact or
       surface it in a job summary.
     value: ${{ steps.report.outputs.findings-report }}
+  unanalyzed-languages:
+    description: >-
+      Comma-separated list of languages present under project-base-dir that
+      this scan did NOT analyze (empty string when none) - see
+      scripts/detect_unanalyzed_languages.py. A non-empty value means the
+      findings above say nothing about these files: they were not analyzed,
+      not analyzed-and-clean.
+    value: ${{ steps.scan.outputs.unanalyzed-languages }}
 
 runs:
   using: composite
@@ -110,6 +134,8 @@ runs:
     - name: Render findings report
       id: report
       shell: bash
+      env:
+        UNANALYZED_LANGUAGES: ${{ steps.scan.outputs.unanalyzed-languages }}
       run: |
         set -euo pipefail
         out_dir="${RUNNER_TEMP:-/tmp}/sonar-findings"
@@ -118,5 +144,35 @@ runs:
         python3 "${{ github.action_path }}/scripts/render_findings_report.py" \
           --findings "${{ steps.fetch.outputs.findings-json }}" \
           --project-key "${{ inputs.project-key }}" \
+          --unanalyzed-languages "$UNANALYZED_LANGUAGES" \
           --out "$report_file"
         echo "findings-report=$report_file" >> "$GITHUB_OUTPUT"
+
+    - name: Report unanalyzed languages
+      # Runs after findings-json and findings-report are both written (the
+      # two steps above), so a fail-on-unanalyzed-languages=true failure
+      # here never costs a caller those outputs - see the input's
+      # description. Surfaces the result everywhere a clean scan could
+      # otherwise look clean by omission: a ::warning:: annotation, the job
+      # summary here; render_findings_report.py already put a banner at the
+      # top of the report above, and sonar-pr.yml's apply_policy.py /
+      # post_pr_comment.py add the Check Run summary and PR comment.
+      id: unanalyzed
+      shell: bash
+      env:
+        UNANALYZED_LANGUAGES: ${{ steps.scan.outputs.unanalyzed-languages }}
+        FAIL_ON_UNANALYZED_LANGUAGES: ${{ inputs.fail-on-unanalyzed-languages }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$UNANALYZED_LANGUAGES" ]]; then
+          message="This scan did NOT analyze: ${UNANALYZED_LANGUAGES} - sonar-scanner-cli cannot analyze these languages, so the absence of findings above says nothing about these files."
+          echo "::warning::${message}"
+          {
+            echo "### SonarQube Community: languages not analyzed"
+            echo "$message"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$FAIL_ON_UNANALYZED_LANGUAGES" == "true" ]]; then
+            echo "Failing: fail-on-unanalyzed-languages is true and the above languages were not analyzed." >&2
+            exit 1
+          fi
+        fi

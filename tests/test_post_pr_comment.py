@@ -1,7 +1,7 @@
 from post_pr_comment import MARKER, render_body
 
 
-def result(blocked=False, total_new_findings=0, threshold="MAJOR", blocking_enabled=True, check_run_url=None):
+def result(blocked=False, total_new_findings=0, threshold="MAJOR", blocking_enabled=True, check_run_url=None, unanalyzed_languages=None):
     return {
         "threshold": threshold,
         "blocking_enabled": blocking_enabled,
@@ -10,6 +10,7 @@ def result(blocked=False, total_new_findings=0, threshold="MAJOR", blocking_enab
         "by_severity": {"BLOCKER": 0, "CRITICAL": 1 if blocked else 0, "MAJOR": 0, "MINOR": 0, "INFO": 0},
         "blocked": blocked,
         "check_run_url": check_run_url,
+        "unanalyzed_languages": unanalyzed_languages or [],
     }
 
 
@@ -94,3 +95,34 @@ def test_render_body_only_one_findings_table():
     """Regression guard against reverting to the old two-table layout."""
     body = render_body(result(), "fallback", severity_counts(), severity_counts())
     assert body.count("| Severity |") == 1
+
+
+def test_render_body_no_banner_when_no_unanalyzed_languages():
+    body = render_body(result(), "fallback", severity_counts(), severity_counts())
+    assert "Not analyzed" not in body
+
+
+def test_render_body_no_banner_when_unanalyzed_languages_key_missing():
+    """apply_policy.py always writes this key, but a persisted/older result
+    file might not - fail soft (no banner), not with a KeyError."""
+    stale_result = result()
+    del stale_result["unanalyzed_languages"]
+    body = render_body(stale_result, "fallback", severity_counts(), severity_counts())
+    assert "Not analyzed" not in body
+
+
+def test_render_body_shows_unanalyzed_languages_banner():
+    body = render_body(
+        result(unanalyzed_languages=["C#", "VB.NET"]), "fallback", severity_counts(), severity_counts(),
+    )
+    assert "Not analyzed" in body
+    assert "C#" in body
+    assert "VB.NET" in body
+
+
+def test_render_body_banner_appears_before_the_blocked_line():
+    body = render_body(
+        result(blocked=True, total_new_findings=1, unanalyzed_languages=["Swift"]),
+        "fallback", severity_counts(), severity_counts(),
+    )
+    assert body.index("Not analyzed") < body.index("**Blocked**")

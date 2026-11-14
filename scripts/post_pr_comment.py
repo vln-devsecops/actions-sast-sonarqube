@@ -44,6 +44,21 @@ def render_body(result, baseline_tier, baseline_counts, removed_counts):
     order = ["BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO"]
 
     lines = ["## SAST SonarQube scan", ""]
+    # A `cli`-mode scan must never present a clean result for files it
+    # didn't analyze (see detect_unanalyzed_languages.py) - this goes ahead
+    # of the blocked/clean verdict below, not after, so it reads as a
+    # caveat on that verdict rather than a footnote under it.
+    # `.get(...)` rather than `result["unanalyzed_languages"]`: this key
+    # didn't always exist, and failing soft (no banner) on an older/stale
+    # result file beats a KeyError.
+    unanalyzed_languages = result.get("unanalyzed_languages") or []
+    if unanalyzed_languages:
+        lines.append(
+            f"**Not analyzed:** {', '.join(unanalyzed_languages)}. sonar-scanner-cli cannot "
+            "analyze these languages - these files were NOT analyzed, so the result below "
+            "says nothing about them."
+        )
+        lines.append("")
     if result["blocked"]:
         lines.append(f"**Blocked** - a new finding meets or exceeds the `{result['threshold']}` threshold.")
     elif result["total_new_findings"]:

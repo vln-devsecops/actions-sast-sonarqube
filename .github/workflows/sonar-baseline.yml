@@ -53,6 +53,19 @@ on:
           similarly unavailable in this context).
         type: string
         default: ubuntu-latest
+      fail-on-unanalyzed-languages:
+        description: >-
+          Set true to fail this job when project-base-dir contains files in
+          a language the plain sonar-scanner-cli can't analyze (see the
+          action's unanalyzed-languages output and README). The findings
+          JSON/report are still produced by the action before it fails -
+          but with this true, a failing scan skips "Upload baseline
+          findings artifact" below (no `if: always()` there), so a baseline
+          build explicitly flagged incomplete is never published as
+          authoritative for PRs to diff against. Default false: warn only -
+          matches this action's v1 behavior.
+        type: boolean
+        default: false
 
 jobs:
   baseline-scan:
@@ -148,6 +161,7 @@ jobs:
           project-base-dir: src/${{ inputs.project-base-dir }}
           sast-config-path: ${{ inputs.sast-config-path }}
           sast-ignore-path: ${{ inputs.sast-ignore-path }}
+          fail-on-unanalyzed-languages: ${{ inputs.fail-on-unanalyzed-languages }}
 
       - name: Upload baseline findings artifact
         # Bundles the machine-readable JSON (what sonar-pr.yml's baseline
