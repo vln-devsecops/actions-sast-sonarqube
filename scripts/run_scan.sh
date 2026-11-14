@@ -95,7 +95,23 @@ esac
 if [[ ! -d "$PROJECT_BASE_DIR" ]]; then
   fail project-base-dir-missing "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' does not exist or is not a directory."
 fi
-ABS_PROJECT_BASE_DIR="$(cd "$PROJECT_BASE_DIR" && pwd)"
+# Resolve to the physical path (pwd -P), so what gets bind-mounted below is
+# exactly the directory that was checked, not a symbolic link to it.
+ABS_PROJECT_BASE_DIR="$(cd "$PROJECT_BASE_DIR" && pwd -P)"
+
+# Under GitHub Actions, the directory to scan must be inside the workspace.
+# Outside Actions (e.g. a manual local run) there is no workspace to
+# confine to, so this check is skipped. It runs before the cli/dotnet
+# split, so both scanner modes (and dotnet mode's build-command, which runs
+# from this directory) are confined the same way.
+if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
+  if ! ABS_WORKSPACE="$(cd "$GITHUB_WORKSPACE" && pwd -P)"; then
+    fail workspace-inaccessible "GITHUB_WORKSPACE '${GITHUB_WORKSPACE}' is not an accessible directory."
+  fi
+  if [[ "$ABS_PROJECT_BASE_DIR" != "$ABS_WORKSPACE" && "$ABS_PROJECT_BASE_DIR" != "$ABS_WORKSPACE"/* ]]; then
+    fail project-base-dir-outside-workspace "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' resolves to '${ABS_PROJECT_BASE_DIR}', outside GITHUB_WORKSPACE '${ABS_WORKSPACE}'."
+  fi
+fi
 
 # The scanner image runs as a baked-in non-root user (uid 1000) by default,
 # and its home directory (/opt/sonar-scanner/.sonar, where it caches
@@ -139,6 +155,17 @@ DOTNET_TOOL_DIR=""
 BUILD_LOG_FILE=""
 trap 'rm -rf "${SCANNER_CACHE_DIR}" ${DOTNET_TOOL_DIR:+"${DOTNET_TOOL_DIR}"}; rm -f "${EXTRA_ARGS_FILE}" "${SCANNER_LOG_FILE}" "${UNANALYZED_LANGUAGES_FILE}" ${BUILD_LOG_FILE:+"${BUILD_LOG_FILE}"}' EXIT
 
+# The scanner would otherwise load sonar-project.properties from the
+# project directory by itself, with every key in it applied. Point its
+# project.settings at an empty file outside the project mount instead;
+# build_scan_config.py reads the consumer's file as data and passes on only
+# the supported keys (see project_properties.py). cli mode only: the
+# SonarScanner for .NET never reads sonar-project.properties, so in dotnet
+# mode the same allowlisted keys reach `begin` as /d: instead (minus
+# sonar.sources/sonar.tests - see filter_dotnet_project_properties()).
+EMPTY_PROJECT_SETTINGS_NAME="empty-sonar-project.properties"
+: > "${SCANNER_CACHE_DIR}/${EMPTY_PROJECT_SETTINGS_NAME}"
+
 # Translate the consumer's optional .sastrc/.sastignore noise-reduction
 # files (neither need exist) into extra scanner properties: -Dkey=value for
 # sonar-scanner-cli, /d:key=value for dotnet-sonarscanner `begin` (which
@@ -149,6 +176,8 @@ trap 'rm -rf "${SCANNER_CACHE_DIR}" ${DOTNET_TOOL_DIR:+"${DOTNET_TOOL_DIR}"}; rm
 build_scan_config_args=(
   --config "$SAST_CONFIG_FILE"
   --ignore-file "$SAST_IGNORE_FILE"
+  --project-properties "${PROJECT_BASE_DIR}/sonar-project.properties"
+  --project-base-dir "$PROJECT_BASE_DIR"
   --out "$EXTRA_ARGS_FILE"
 )
 if [[ "${SCM_DISABLED:-false}" == "true" ]]; then
@@ -296,11 +325,13 @@ scan_with_cli() {
     -Dsonar.projectKey="${PROJECT_KEY}" \
     -Dsonar.projectBaseDir=/usr/src \
     -Dsonar.working.directory=/usr/src/.scannerwork \
+    -Dproject.settings="/tmp/sonar-cache/${EMPTY_PROJECT_SETTINGS_NAME}" \
     "${EXTRA_SCANNER_ARGS[@]}" \
     2>&1 | tee "$SCANNER_LOG_FILE"; then
     fail scanner-failed "sonar-scanner-cli failed (see the scanner output above)."
   fi
-  # ^ sonar.working.directory: the current SonarScanner Engine
+  # ^ project.settings: see EMPTY_PROJECT_SETTINGS_NAME above.
+  # sonar.working.directory: the current SonarScanner Engine
   #   (sonar-scanner-cli 12.x / engine 8.x) defaults this to
   #   /tmp/.scannerwork inside the container - not a path under
   #   projectBaseDir - so report-task.txt (read back from the host below)
@@ -347,6 +378,7 @@ detect_args=(
   --project-base-dir "$ABS_PROJECT_BASE_DIR"
   --config "$SAST_CONFIG_FILE"
   --ignore-file "$SAST_IGNORE_FILE"
+  --config-base-dir "$PROJECT_BASE_DIR"
   --out "$UNANALYZED_LANGUAGES_FILE"
 )
 if [[ "$SCANNER_MODE" == "dotnet" ]]; then

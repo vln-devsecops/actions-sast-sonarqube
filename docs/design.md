@@ -35,6 +35,18 @@ no field for those, and any key/value outside it fails the job closed
 rather than being silently dropped or silently applied - the same
 philosophy as `fetch_findings.py`'s `_coerce_severity` fail-closed fallback.
 
+The same reasoning applies to `sonar-project.properties`, which the
+scanner would otherwise load from the project directory by itself, with
+every key applied (including `sonar.scanner.*` runtime and connection
+settings and analyzer settings that name executables). `run_scan.sh`
+points `project.settings` at an empty file outside the project mount, and
+`scripts/project_properties.py` parses the consumer's file as data (Java
+`.properties` syntax, UTF-8, values trimmed - as the pinned scanner reads
+it) and keeps only a short allowlist of analysis-scope keys, passed as
+`-D` and merged in Python so each key is emitted once. An allowlist rather
+than a blocklist, because the set of keys a scanner and its analyzers
+honour changes with every release.
+
 The two files split along "structured, needs validation" (`.sastrc`, a
 small YAML schema translated onto the underlying `sonar.*` properties) vs.
 "the common case, familiar syntax" (`.sastignore`, a practical subset of

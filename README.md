@@ -140,7 +140,8 @@ C++, Objective-C, or Swift (so it never even indexes or logs about them;
 `scripts/detect_unanalyzed_languages.py` instead looks for `.c`, `.cc`,
 `.cpp`, `.cxx`, `.c++`, `.m`, `.mm`, and `.swift` files under
 `project-base-dir`, honoring `.sastrc` `exclusions.paths` and
-`.sastignore`). A repo in one of these languages would otherwise get a
+`.sastignore`, read with the same regular-file-inside-`project-base-dir`
+checks as the scan itself). A repo in one of these languages would otherwise get a
 scan that looks clean - zero findings - while actually saying nothing
 about those files at all.
 
@@ -298,15 +299,19 @@ untrusted author within one job:
   matters even more, because the PR's build runs on your machine.
 - Check out with `persist-credentials: false`, so the build can't read a
   `GITHUB_TOKEN` from `.git/config`.
-- `sonar-pr.yml` clears each fixed checkout subdirectory it reuses
-  (`.sast-sonarqube`, `.baseline-checkout`) right before checking it out
-  again, and routes every intermediate file a trusted step writes
-  (`changed-files.txt`, `new-findings.json`, `policy-result.json`, the
-  extracted baseline artifact, ...) through `$RUNNER_TEMP` instead of a
-  bare workspace-root filename. `scripts/check_checkout_order.py`
-  enforces the checkout-clearing pattern structurally and flags shell
-  redirects, `tee`, and output flags in `run:` blocks that bypass
-  `$RUNNER_TEMP`; other write forms need manual review.
+- Both reusable workflows check the caller's code out into `src`, with
+  this action's own source (`.sast-sonarqube`) and the fallback baseline
+  (`.baseline-checkout`) as siblings - never under the scanned directory,
+  and never wiped or replaced by the PR's checkout. Each fixed checkout
+  path is cleared right before it is checked out, and every intermediate
+  file a trusted step writes (`changed-files.txt`, `new-findings.json`,
+  `policy-result.json`, the extracted baseline artifact, ...) goes under
+  `${RUNNER_TEMP}/sonar-pr/` instead of the workspace.
+  `tests/test_workflow_hardening.py` enforces this layout, the
+  checkout-clearing pattern, `persist-credentials: false`, the fork-PR
+  gate's step order and `if:` conditions, and flags shell redirects, `tee`,
+  and output flags in `run:` blocks that bypass `$RUNNER_TEMP`; other write
+  forms need manual review.
 
 #### Fork PRs in `scanner-mode: dotnet`
 
@@ -624,6 +629,47 @@ unrecognized key exits non-zero with a clear error before the scan runs,
 rather than silently doing nothing. There is deliberately no way to set
 `sonar.host.url`, `sonar.token`, `sonar.projectKey`, `sonar.projectBaseDir`,
 or `sonar.working.directory` through either file.
+
+Both files must be regular files inside `project-base-dir`. A path that
+resolves outside it, or that is (or passes through) a symbolic link below
+it, also fails the job closed - commit the file itself rather than a link
+to it.
+
+## `sonar-project.properties`
+
+The scanner is not given the project's `sonar-project.properties`
+directly. Instead, the action reads `project-base-dir/sonar-project.properties`
+(if present; same regular-file / no-symlink rules as above) and passes on
+only these keys:
+
+| Key | Why it is honoured |
+| --- | --- |
+| `sonar.sources`, `sonar.tests` | which directories hold code and tests |
+| `sonar.inclusions`, `sonar.exclusions` | narrow the analysed file set |
+| `sonar.test.inclusions`, `sonar.test.exclusions` | narrow the test file set |
+| `sonar.coverage.exclusions`, `sonar.cpd.exclusions` | leave files out of coverage / duplication |
+| `sonar.sourceEncoding` | how source files are decoded |
+| `sonar.python.version`, `sonar.java.source` | which language level the rules assume |
+
+Every other key (server, credential, scanner runtime, proxy, cache,
+plugin, module and analyzer-runtime settings included) is ignored, and the
+job logs a warning listing the ignored key names. Path-valued keys must
+stay inside the project (no absolute paths, no `..`, no double quotes), no value may contain
+a `${...}` placeholder, and an invalid value for a supported key fails the
+job closed. `.sastrc`/`.sastignore` take precedence over
+`sonar-project.properties` for the same key, and the action's own
+`sonar.projectKey`/`sonar.projectBaseDir`/`sonar.working.directory` cannot
+be set from either. `sonar.modules` (multi-module layouts) is not
+supported.
+
+With `scanner-mode: dotnet` the same rules apply, and the supported keys
+reach `dotnet-sonarscanner begin` as `/d:key=value` (the SonarScanner for
+.NET never reads `sonar-project.properties` itself), except
+`sonar.sources` and `sonar.tests`: that scanner ignores both and takes
+sources and test projects from MSBuild, so they are dropped with a
+warning. Dropping them can only widen what is analyzed, never hide a
+finding. (`.sastrc` `tests.paths`, by contrast, fails the job in dotnet
+mode - see above.)
 
 ## Testing
 
