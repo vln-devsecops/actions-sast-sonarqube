@@ -200,6 +200,8 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - 2026-11-14 - Workspace-check failures report `failure-reason` codes `project-base-dir-outside-workspace` and `workspace-inaccessible` (rlc).
 - 2026-11-14 - #54's `check_checkout_order.py` is replaced by `tests/test_workflow_hardening.py` asserting the `src/` layout invariants, and #54's broader workspace-write detection (`cp`/`mv`, `-o`, shell variables) is ported into dev's checker (rlc).
 
+- 2026-11-14 - Scanner container network (rlc): join the compose network only when the default `sonar-host-url` is used and the action's compose `sonarqube` container is found; otherwise keep host networking with a deprecation warning. Removing host networking is deferred to a future major version (v2), so no `@v1` caller breaks.
+
 ## Open questions
 
 - Runner requirements: do all target runners (including self-hosted, hardened `noexec` /tmp ones) allow the .NET SDK install and the scanner's JRE?
@@ -211,7 +213,10 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - Pre-existing: `action.yml`'s fetch and report steps interpolate `${{ inputs.* }}` (project-key, sonar-host-url, and the token on `fetch_findings.py`'s argv) directly inside `run:`. Move them to `env:`. Found in the Phase 2-3 review; present since before this plan; separate `fix(action):` PR.
 
 - Separate hardening PRs found during this work, each its own changelog entry (not part of the C# PRs): #55 config-path hardening, #57 scanner settings allowlist, #56 checkout layout (action source outside the scanned project). Merge order #55 -> #57 -> #56, released together as v1.2.2, then reconcile #52 -> #53 -> #54 onto it (dropping #54's re-checkout step, which #56's layout makes unnecessary).
-- Queued after #56 merges, as its own PR from `dev`: scanner container hardening - read-only project mount with the working directory in the cache mount, `persist-credentials: false` on the remaining checkouts, and the scanner on the compose network instead of the host network.
+- Queued (in progress on `fix/scanner-container-isolation`, stacked on #54): scanner container hardening - read-only project mount with the working directory in the cache mount, `persist-credentials: false` on the remaining checkouts, and the scanner on the compose network instead of the host network.
+
+- Queued: confine `project-base-dir` to the caller's checkout root (`src/`) rather than the whole workspace - its own small PR.
+- Future major (v2): remove host networking for the scanner container.
 
 ## Risks
 
@@ -241,3 +246,4 @@ Today the PR job never executes the code under scan. In `dotnet` mode, `build-co
 - 2026-11-12 - Phase 4 PR #54 opened (stacked on #53) after three independent review rounds that fixed: dispatch TOCTOU (dispatch now requires the reviewed `head-sha`, re-checked live before checkout), `persist-credentials: false` breaking `git fetch` for private cli callers (fetch removed; `fetch-depth: 0` already fetches all branches), the PR checkout wiping the trusted `.sast-sonarqube` and letting a PR supply its own (re-checkout + structural order test), and `pull_request_target` (now rejected in every mode - a fork's `.sastignore` could otherwise get a green required check with the base repo's token). CI on #54 green, including `pr-scan-dotnet` (first real same-repo dotnet run through the reusable workflow). Symlink hardening (pre-existing) being added to #54.
 - 2026-11-13 - Hardening found during review split into separate PRs (#55, #56, #57) per rlc, so each appears in the changelog; container-hardening follow-up queued after #56. C# stack to be reconciled onto v1.2.2.
 - 2026-11-14 - v1.2.2 release PR #58 lists #55, #57, #56. C# stack reconciled onto dev by merge (no history rewritten): #52 641d3c7, #53 333fc92, #54 9f4ced7; CI green on all three; #54 drops its re-checkout step now that #56 checks caller code out into `src`. Independent review in progress.
+- 2026-11-14 - #52 and #53 merged; #54 retargeted to dev and green. Container hardening review: read-only mount and checkout hardening verified; network change reworked to fall back to host networking with a deprecation warning (rlc).
