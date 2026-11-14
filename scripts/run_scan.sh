@@ -160,18 +160,26 @@ docker run --rm \
 # plain CLI indexed but couldn't analyze them (from the scanner's own log
 # line above) or because they have no Community Build plugin at all, so
 # the scanner never even logs about them (from a file-extension scan of
-# PROJECT_BASE_DIR instead - see detect_unanalyzed_languages.py). This
-# never fails the scan itself: it only produces a result that action.yml
-# surfaces (warning annotation, job summary, report banner, Check
-# Run/comment, and the fail-on-unanalyzed-languages input) after the
-# findings and report outputs further downstream are written.
-python3 "$(dirname "${BASH_SOURCE[0]}")/detect_unanalyzed_languages.py" \
+# PROJECT_BASE_DIR instead - see detect_unanalyzed_languages.py). Finding
+# unanalyzed languages never fails the scan itself: it only produces a
+# result that action.yml surfaces (warning annotation, job summary, report
+# banner, Check Run/comment, and the fail-on-unanalyzed-languages input)
+# after the findings and report outputs further downstream are written.
+# Detection does fail the scan if it can't read .sastrc/.sastignore safely:
+# it re-reads them through read_config_file(), and a file that has become a
+# symbolic link (or otherwise invalid) since build_scan_config.py read it
+# is rejected the same way, rather than silently detecting without the
+# consumer's exclusions.
+if ! python3 "$(dirname "${BASH_SOURCE[0]}")/detect_unanalyzed_languages.py" \
   --scanner-log "$SCANNER_LOG_FILE" \
   --project-base-dir "$ABS_PROJECT_BASE_DIR" \
   --config "$SAST_CONFIG_FILE" \
   --ignore-file "$SAST_IGNORE_FILE" \
   --config-base-dir "$PROJECT_BASE_DIR" \
-  --out "$UNANALYZED_LANGUAGES_FILE"
+  --out "$UNANALYZED_LANGUAGES_FILE"; then
+  echo "Rejected the SAST config while detecting unanalyzed languages (see the error above)." >&2
+  exit 1
+fi
 UNANALYZED_LANGUAGES="$(cat "$UNANALYZED_LANGUAGES_FILE")"
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "unanalyzed-languages=${UNANALYZED_LANGUAGES}" >> "$GITHUB_OUTPUT"
