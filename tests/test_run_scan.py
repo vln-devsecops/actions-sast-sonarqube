@@ -34,8 +34,15 @@ pytestmark = pytest.mark.skipif(
 FAKE_DOCKER = r"""#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == "compose" ]]; then
-  if [[ "$*" == *"ps -q sonarqube"* ]]; then
-    echo "fake-sonarqube-container-id"
+  if [[ "$*" == *"ps -a -q sonarqube"* ]]; then
+    # FAKE_SONARQUBE_PS_OUTPUT unset/empty (the default): no matching
+    # compose container at all - this harness has no real compose stack,
+    # so the scanner falls back to the host network. A test that wants the
+    # "found" path sets this to one container id (or two, newline-joined,
+    # for the "ambiguous" case).
+    if [[ -n "${FAKE_SONARQUBE_PS_OUTPUT:-}" ]]; then
+      printf '%s\n' "$FAKE_SONARQUBE_PS_OUTPUT"
+    fi
     exit 0
   fi
   echo "sonarqube:26.8.0.126808-community"
@@ -43,10 +50,21 @@ if [[ "$1" == "compose" ]]; then
   exit 0
 fi
 if [[ "$1" == "inspect" ]]; then
+  if [[ "$*" == *".State.Status"* ]]; then
+    echo "${FAKE_SONARQUBE_STATUS:-running}"
+    exit 0
+  fi
   # Mirrors the real `docker inspect -f '{{json .NetworkSettings.Networks}}'`
   # output (a JSON object keyed by network name), since run_scan.sh pipes
   # this through a real `jq -r 'keys[]'` to extract them.
-  echo '{"fake-network":{}}'
+  json="{"
+  first=true
+  for net in ${FAKE_SONAR_NETWORKS:-fake-network}; do
+    if [[ "$first" == true ]]; then first=false; else json+=","; fi
+    json+="\"${net}\":{}"
+  done
+  json+="}"
+  echo "$json"
   exit 0
 fi
 if [[ "$1" == "run" ]]; then
@@ -275,19 +293,20 @@ def _normalize_cache_mount(args):
     return [re.sub(r"sonar-scanner-cache\.[A-Za-z0-9]+", "sonar-scanner-cache.XXXXXX", a) for a in args]
 
 
-def _expected_cli_args(h, extra=()):
-    # The scanner joins the ephemeral stack's own compose network (here,
-    # FAKE_DOCKER's fixed "fake-network") instead of --network host, and
-    # reaches SonarQube by compose service name.
+def _expected_cli_args(h, extra=(), network=("--network", "host"), container_host_url=HOST):
+    # network/container_host_url default to the host-network fallback (no
+    # compose "sonarqube" container found - see FAKE_DOCKER's "ps -a -q
+    # sonarqube" default). Pass network=("--network", "<name>") and
+    # container_host_url="http://sonarqube:9000" for the "joined the
+    # compose network" scenario instead.
     return [
         "run",
         "--rm",
-        "--network",
-        "fake-network",
+        *network,
         "--user",
         f"{os.getuid()}:{os.getgid()}",
         "-e",
-        "SONAR_HOST_URL=http://sonarqube:9000",
+        f"SONAR_HOST_URL={container_host_url}",
         "-e",
         f"SONAR_TOKEN={TOKEN}",
         "-e",
@@ -313,13 +332,19 @@ def _expected_cli_args(h, extra=()):
 
 
 def test_cli_default_invocation_is_unchanged(harness):
-    # No new inputs set at all (SCANNER_MODE/BUILD_COMMAND/... absent):
-    # exactly the docker invocation this script made before dotnet mode.
+    # No new inputs set at all (SCANNER_MODE/BUILD_COMMAND/... absent), and
+    # this harness has no real compose "sonarqube" container for the
+    # default sonar-host-url to find (FAKE_DOCKER's "ps -a -q sonarqube"
+    # default) - the scanner falls back to the host network, with a
+    # deprecation warning, exactly as it always has. The project mount is
+    # still `:ro` and sonar.working.directory still moved off it either
+    # way - see _expected_cli_args.
     result = harness.run()
     assert result.returncode == 0, result.stderr
     assert _normalize_cache_mount(harness.args("docker-run.args")) == _expected_cli_args(harness)
     assert harness.args("dotnet-tool.args") is None
     assert "Compute engine task succeeded." in result.stdout
+    assert "::warning::" in result.stdout and "deprecated" in result.stdout
 
 
 def test_cli_explicit_mode_matches_default(harness):
@@ -358,6 +383,49 @@ def test_unknown_scanner_mode_fails(harness):
     result = harness.run(SCANNER_MODE="msbuild")
     assert result.returncode != 0
     assert "scanner-mode must be 'cli' or 'dotnet'" in result.stderr
+    assert harness.args("docker-run.args") is None
+
+
+# --- cli mode: scanner container network (sonar-host-url, compose lookup) ------
+
+
+def test_cli_joins_compose_network_when_sonarqube_container_is_found(harness):
+    result = harness.run(FAKE_SONARQUBE_PS_OUTPUT="fake-container-id", FAKE_SONAR_NETWORKS="fake-network")
+    assert result.returncode == 0, result.stderr
+    assert _normalize_cache_mount(harness.args("docker-run.args")) == _expected_cli_args(
+        harness, network=("--network", "fake-network"), container_host_url="http://sonarqube:9000"
+    )
+    assert "::warning::" not in result.stdout
+
+
+def test_cli_non_default_sonar_host_url_falls_back_with_a_warning(harness):
+    custom = "http://127.0.0.1:9000"
+    # A compose container IS "found" here (FAKE_SONARQUBE_PS_OUTPUT set),
+    # but sonar-host-url isn't the default, so run_scan.sh must not even
+    # look - the compose lookup is for the default URL only.
+    result = harness.run(
+        SONAR_HOST_URL=custom, FAKE_SONARQUBE_PS_OUTPUT="fake-container-id", FAKE_SONAR_NETWORKS="fake-network"
+    )
+    assert result.returncode == 0, result.stderr
+    assert _normalize_cache_mount(harness.args("docker-run.args")) == _expected_cli_args(
+        harness, network=("--network", "host"), container_host_url=custom
+    )
+    assert "::warning::" in result.stdout and "deprecated" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "overrides,reason",
+    [
+        ({"FAKE_SONARQUBE_PS_OUTPUT": "fake-container-id", "FAKE_SONARQUBE_STATUS": "exited"}, "sonarqube-service-not-running"),
+        ({"FAKE_SONARQUBE_PS_OUTPUT": "fake-container-id", "FAKE_SONARQUBE_STATUS": "restarting"}, "sonarqube-service-not-running"),
+        ({"FAKE_SONARQUBE_PS_OUTPUT": "fake-container-id", "FAKE_SONAR_NETWORKS": "net-one net-two"}, "sonarqube-network-ambiguous"),
+        ({"FAKE_SONARQUBE_PS_OUTPUT": "fake-container-id-1\nfake-container-id-2"}, "sonarqube-service-ambiguous"),
+    ],
+)
+def test_cli_sonarqube_lookup_errors_fail_closed_with_a_reason(harness, overrides, reason):
+    result = harness.run(**overrides)
+    assert result.returncode != 0
+    assert _output(harness, "failure-reason") == reason
     assert harness.args("docker-run.args") is None
 
 
@@ -686,7 +754,7 @@ printf '%s\\n' "$*" >> "$WS_FAKE_DOCKER_LOG"
 if [[ "$1" == "compose" ]]; then
   if [[ "$*" == *"--images"* ]]; then
     echo "sonarsource/sonar-scanner-cli:test"
-  elif [[ "$*" == *"ps -q sonarqube"* ]]; then
+  elif [[ "$*" == *"ps -a -q sonarqube"* ]]; then
     # FAKE_SONARQUBE_CONTAINER_IDS: whitespace-separated container ids, one
     # per matching container (empty/unset -> exactly one, the common case;
     # set to "" explicitly to simulate none found).
@@ -699,6 +767,10 @@ if [[ "$1" == "compose" ]]; then
   exit 0
 fi
 if [[ "$1" == "inspect" ]]; then
+  if [[ "$*" == *".State.Status"* ]]; then
+    echo "${FAKE_SONARQUBE_STATUS:-running}"
+    exit 0
+  fi
   # Mirrors the real `docker inspect -f '{{json .NetworkSettings.Networks}}'`
   # output (a JSON object keyed by network name) rather than a plain list of
   # names, since run_scan.sh pipes this through a real `jq -r 'keys[]'` -
@@ -766,6 +838,8 @@ def ws_env(tmp_path):
     runner_temp = tmp_path / "runner-temp"
     runner_temp.mkdir()
     log = tmp_path / "docker.log"
+    github_output = tmp_path / "ws_github_output"
+    github_output.write_text("")
 
     variables = {
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
@@ -777,8 +851,15 @@ def ws_env(tmp_path):
         "RUNNER_TEMP": str(runner_temp),
         "GITHUB_WORKSPACE": str(workspace),
         "WS_FAKE_DOCKER_LOG": str(log),
+        "GITHUB_OUTPUT": str(github_output),
     }
-    return {"vars": variables, "workspace": workspace, "log": log, "tmp": tmp_path}
+    return {
+        "vars": variables,
+        "workspace": workspace,
+        "log": log,
+        "tmp": tmp_path,
+        "github_output": github_output,
+    }
 
 
 def _ws_run(ws_env, project_base_dir, cwd, extra_env=None):
@@ -802,6 +883,15 @@ def _ws_docker_run_calls(ws_env):
 def _ws_docker_calls(ws_env):
     log = ws_env["log"]
     return log.read_text().splitlines() if log.exists() else []
+
+
+def _ws_output(ws_env, name):
+    values = [
+        line.split("=", 1)[1]
+        for line in ws_env["github_output"].read_text().splitlines()
+        if line.startswith(f"{name}=")
+    ]
+    return values[-1] if values else None
 
 
 def test_scans_regular_directory_inside_workspace(ws_env):
@@ -858,7 +948,7 @@ def test_project_mount_is_read_only(ws_env):
     assert f"-v {project.resolve()}:/usr/src:ro" in run_calls[0]
 
 
-def test_never_uses_the_host_network(ws_env):
+def test_never_uses_the_host_network_when_the_compose_container_is_found(ws_env):
     project = ws_env["workspace"] / "app"
     project.mkdir()
     _ws_run(ws_env, "app", ws_env["workspace"])
@@ -878,8 +968,9 @@ def test_scanner_joins_the_sonarqube_service_container_s_own_network_by_default(
     assert len(run_calls) == 1, proc.stderr
     assert "--network unique-ephemeral-net-7f3a " in run_calls[0]
     docker_calls = _ws_docker_calls(ws_env)
-    assert any("ps -q sonarqube" in c for c in docker_calls)
+    assert any("ps -a -q sonarqube" in c for c in docker_calls)
     assert any(c.startswith("inspect ") for c in docker_calls)
+    assert "::warning::" not in proc.stdout
 
 
 def test_scanner_reaches_sonarqube_by_compose_service_name_when_host_url_is_default(ws_env):
@@ -891,7 +982,7 @@ def test_scanner_reaches_sonarqube_by_compose_service_name_when_host_url_is_defa
     assert "-e SONAR_HOST_URL=http://sonarqube:9000 " in run_calls[0]
 
 
-def test_non_default_sonar_host_url_runs_without_the_compose_network(ws_env):
+def test_non_default_sonar_host_url_falls_back_to_host_network_with_a_warning(ws_env):
     project = ws_env["workspace"] / "app"
     project.mkdir()
     proc = _ws_run(
@@ -900,11 +991,12 @@ def test_non_default_sonar_host_url_runs_without_the_compose_network(ws_env):
     )
     run_calls = _ws_docker_run_calls(ws_env)
     assert len(run_calls) == 1, proc.stderr
-    assert "--network" not in run_calls[0]
+    assert "--network host" in run_calls[0]
     # The custom URL is passed through unchanged for the scanner to use
     # in-container - it is the caller's responsibility to make sure it is
     # reachable from a container on the default bridge network.
     assert "-e SONAR_HOST_URL=https://sonar.example.internal:9000 " in run_calls[0]
+    assert "::warning::" in proc.stdout and "deprecated" in proc.stdout
 
 
 def test_non_default_sonar_host_url_does_not_query_the_compose_network(ws_env):
@@ -915,19 +1007,46 @@ def test_non_default_sonar_host_url_does_not_query_the_compose_network(ws_env):
         extra_env={"SONAR_HOST_URL": "https://sonar.example.internal:9000"},
     )
     docker_calls = _ws_docker_calls(ws_env)
-    assert not any("ps -q sonarqube" in c for c in docker_calls)
+    assert not any("ps -a -q sonarqube" in c for c in docker_calls)
     assert not any(c.startswith("inspect ") for c in docker_calls)
 
 
-def test_fails_clearly_when_the_sonarqube_service_container_is_not_found(ws_env):
+def test_falls_back_to_host_network_with_a_warning_when_sonarqube_container_not_found(ws_env):
+    # The default sonar-host-url, but no compose "sonarqube" container at
+    # all (as opposed to one found but not running/ambiguous, below) -
+    # not an error: this script's own ephemeral stack simply isn't up
+    # under this COMPOSE_FILE (e.g. SonarQube reached some other way).
     project = ws_env["workspace"] / "app"
     project.mkdir()
     proc = _ws_run(
         ws_env, "app", ws_env["workspace"],
         extra_env={"FAKE_SONARQUBE_CONTAINER_IDS": ""},
     )
+    # WS_FAKE_DOCKER's "run" branch only reports success with
+    # FAKE_DOCKER_RUN_SUCCEEDS=true (unset here) - it deliberately reports
+    # a failed scan otherwise, so run_scan.sh stops right after `docker
+    # run` without polling a server. What this test actually pins is the
+    # fallback network/URL choice `docker run` was invoked with.
+    run_calls = _ws_docker_run_calls(ws_env)
+    assert len(run_calls) == 1
+    assert "--network host" in run_calls[0]
+    assert "-e SONAR_HOST_URL=http://localhost:9000 " in run_calls[0]
+    assert "::warning::" in proc.stdout and "deprecated" in proc.stdout
+    docker_calls = _ws_docker_calls(ws_env)
+    assert any("ps -a -q sonarqube" in c for c in docker_calls)
+    # Count is 0 (nothing found) - never reaches the network inspection.
+    assert not any(c.startswith("inspect ") for c in docker_calls)
+
+
+def test_fails_clearly_when_the_sonarqube_service_container_is_not_running(ws_env):
+    project = ws_env["workspace"] / "app"
+    project.mkdir()
+    proc = _ws_run(
+        ws_env, "app", ws_env["workspace"],
+        extra_env={"FAKE_SONARQUBE_STATUS": "exited"},
+    )
     assert proc.returncode != 0
-    assert "sonarqube" in proc.stderr.lower()
+    assert _ws_output(ws_env, "failure-reason") == "sonarqube-service-not-running"
     assert _ws_docker_run_calls(ws_env) == []
 
 
@@ -939,7 +1058,19 @@ def test_fails_clearly_when_the_sonarqube_service_container_has_multiple_network
         extra_env={"FAKE_SONAR_NETWORKS": "net-one net-two"},
     )
     assert proc.returncode != 0
-    assert "network" in proc.stderr.lower()
+    assert _ws_output(ws_env, "failure-reason") == "sonarqube-network-ambiguous"
+    assert _ws_docker_run_calls(ws_env) == []
+
+
+def test_fails_clearly_when_multiple_sonarqube_containers_are_found(ws_env):
+    project = ws_env["workspace"] / "app"
+    project.mkdir()
+    proc = _ws_run(
+        ws_env, "app", ws_env["workspace"],
+        extra_env={"FAKE_SONARQUBE_CONTAINER_IDS": "fake-id-one fake-id-two"},
+    )
+    assert proc.returncode != 0
+    assert _ws_output(ws_env, "failure-reason") == "sonarqube-service-ambiguous"
     assert _ws_docker_run_calls(ws_env) == []
 
 
@@ -1077,15 +1208,13 @@ def test_refuses_symlinked_config_file_before_starting_scanner(ws_env):
 # run_scan.sh must report that as a rejected SAST config, not just die.
 WS_SWAPPING_DOCKER = """#!/usr/bin/env bash
 if [[ "$1" == "compose" ]]; then
-  if [[ "$*" == *"ps -q sonarqube"* ]]; then
-    echo "fake-sonarqube-container-id"
+  if [[ "$*" == *"ps -a -q sonarqube"* ]]; then
+    # No compose "sonarqube" container - the default URL falls back to the
+    # host network; this test is about the config-swap detection, not the
+    # network path.
     exit 0
   fi
   echo "sonarsource/sonar-scanner-cli:test"
-  exit 0
-fi
-if [[ "$1" == "inspect" ]]; then
-  echo '{"fake-network":{}}'
   exit 0
 fi
 for arg in "$@"; do
