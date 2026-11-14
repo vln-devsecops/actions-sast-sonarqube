@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.2.2...v1.3.0) (2026-11-14)
+
+
+### Features
+
+* **scan:** add dotnet scanner mode for C# ([#53](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/53)) ([2cbf9d0](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/2cbf9d0b97257754a7f1a5004df45a8b02ac9e5c))
+* **scan:** report languages the CLI scanner cannot analyze ([#52](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/52)) ([f2bd8e6](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/f2bd8e6efed9ec5169ce680eb8285e1b46321604))
+
 ## [1.2.2](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.2.1...v1.2.2) (2026-11-13)
 
 
