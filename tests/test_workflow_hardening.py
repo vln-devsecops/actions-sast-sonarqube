@@ -212,3 +212,74 @@ def test_allowed_targets():
 )
 def test_lies_under(sibling, prefix_dir, expected):
     assert _lies_under(sibling, prefix_dir) == expected
+
+
+# A git subcommand that needs remote credentials against origin: `fetch`,
+# `pull`, or `push` - anchored so it doesn't false-positive on a word like
+# "gitfetcher" or match mid-identifier.
+CREDENTIALED_GIT_SUBCOMMAND = re.compile(r"(?<![\w.-])git\s+(fetch|pull|push)\b")
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS)
+def test_every_checkout_disables_persisted_credentials(workflow):
+    """A checked-out repo's embedded git credential helper is only needed by
+    a later git command that talks to a remote (fetch/pull/push) - none of
+    which this job needs (see test_no_git_command_needs_remote_credentials
+    below) - so every checkout should set persist-credentials: false rather
+    than leave a live credential sitting in the checkout's git config for
+    the rest of the job."""
+    checked = 0
+    for job_name, steps in _steps(workflow):
+        for step in steps:
+            if not str(step.get("uses", "")).startswith("actions/checkout@"):
+                continue
+            checked += 1
+            with_block = step.get("with") or {}
+            assert with_block.get("persist-credentials") is False, (
+                f"{workflow}:{job_name}: checkout {step.get('name')!r} does not "
+                "set persist-credentials: false"
+            )
+    assert checked > 0, f"{workflow}: expected at least one checkout step"
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS)
+def test_no_git_command_needs_remote_credentials(workflow):
+    """No `run:` step may need a credentialed git command (fetch/pull/push
+    against origin) - this is what makes persist-credentials: false (above)
+    safe to turn on for every checkout: resolving a base ref's history
+    should rely on actions/checkout's own fetch-depth: 0 (which already
+    populates refs/remotes/origin/* - see actions/checkout src/ref-helper.ts
+    getRefSpecForAllHistory(), invoked whenever fetchDepth <= 0 per
+    src/git-source-provider.ts), then verify locally with `git rev-parse
+    --verify`, rather than fetch again with a live credential."""
+    offenders = []
+    for job_name, steps in _steps(workflow):
+        for step in steps:
+            script = step.get("run")
+            if not script:
+                continue
+            for line in script.splitlines():
+                if line.lstrip().startswith("#"):
+                    continue
+                match = CREDENTIALED_GIT_SUBCOMMAND.search(line)
+                if match:
+                    offenders.append(
+                        f"{job_name} / {step.get('name')}: `git {match.group(1)}` - {line.strip()}"
+                    )
+    assert offenders == [], "git commands needing remote credentials:\n" + "\n".join(offenders)
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [
+        ('git fetch origin "$BASE_REF"', "fetch"),
+        ("git pull", "pull"),
+        ("git push origin HEAD", "push"),
+        ("git merge-base origin/main HEAD", None),
+        ("git diff --name-only HEAD~1", None),
+        ("git rev-parse --verify origin/main", None),
+    ],
+)
+def test_credentialed_git_subcommand_pattern(line, expected):
+    match = CREDENTIALED_GIT_SUBCOMMAND.search(line)
+    assert (match.group(1) if match else None) == expected
