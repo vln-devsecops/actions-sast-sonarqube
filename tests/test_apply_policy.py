@@ -165,6 +165,12 @@ def test_build_summary_shows_unanalyzed_languages_banner():
     assert "VB.NET" in summary
 
 
+def test_build_summary_banner_wording_is_scanner_mode_neutral():
+    summary = build_summary([], [], "MAJOR", False, unanalyzed_languages=["C#"])
+    assert "sonar-scanner-cli" not in summary
+    assert "build-command" in summary
+
+
 def test_build_summary_banner_appears_before_the_findings_count():
     summary = build_summary([], [], "MAJOR", False, unanalyzed_languages=["Swift"])
     assert summary.index("Not analyzed") < summary.index("new finding(s)")

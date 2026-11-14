@@ -116,8 +116,9 @@ own artifact and links it from the job's step summary.
 
 ### Languages this scan can't analyze
 
-This action runs only `sonar-scanner-cli` in Docker - the plain Community
-Build CLI, not a build-integrated scanner. That CLI does not analyze C# or
+By default (`scanner-mode: cli`) this action runs only `sonar-scanner-cli`
+in Docker - the plain Community Build CLI, not a build-integrated scanner
+(see `scanner-mode: dotnet` below for C#). That CLI does not analyze C# or
 VB.NET (files get indexed, but no rules run against them - the scanner
 itself logs a `WARN` line to that effect) and has no plugin at all for C,
 C++, Objective-C, or Swift (so it never even indexes or logs about them;
@@ -151,6 +152,132 @@ to `"true"` (on the action directly, or the equivalent input on either
 reusable workflow) to fail instead; the findings JSON and findings report
 are still produced first, so callers reading them with `if: always()`
 aren't affected by the failure.
+
+### Scanning C#: `scanner-mode: dotnet`
+
+C# is analyzed only by the SonarScanner for .NET, which wraps the build:
+`begin`, then your build, then `end`. Set `scanner-mode: dotnet` on the
+action to use it instead of the CLI. Inputs:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `scanner-mode` | `cli` | `cli` (unchanged) or `dotnet`. |
+| `build-command` | `""` | Required with `dotnet`, rejected with `cli`. Builds the code, e.g. `dotnet build MySolution.sln`. Runs with `bash -c` from `project-base-dir`, between `begin` and `end`. `SONAR_TOKEN` is removed from its environment, but the build can still read the token (see the trust note). |
+| `dotnet-version` | `10.0.x` | Passed to `actions/setup-dotnet`, which runs only in `dotnet` mode. |
+| `import-roslyn-issues` | `"false"` | `"true"` also imports the project's own Roslyn analyzer issues (StyleCop, CA*, compiler warnings). By default only Sonar's own C# rules are reported (`sonar.cs.roslyn.ignoreIssues=true`). |
+
+```yaml
+# a .NET repo, calling the action directly (SonarQube already up - see
+# ci.yml's dotnet-e2e job for the stack setup steps)
+- uses: vln-devsecops/actions-sast-sonarqube@v1
+  with:
+    sonar-token: ${{ steps.bootstrap.outputs.token }}
+    project-key: my-dotnet-app
+    project-base-dir: .
+    scanner-mode: dotnet
+    dotnet-version: "10.0.x"
+    build-command: dotnet build MySolution.sln
+```
+
+The scan fails, rather than reporting a clean result, when:
+
+- `build-command` exits non-zero (`end` is not run);
+- `begin` or `end` exits non-zero (e.g. nothing was built, or no C# was
+  compiled at all);
+- any project the build touched was not analyzed, even though `end`
+  exited 0 with `ANALYSIS SUCCESSFUL`. That happens when a project fails to
+  build behind a build script that swallows the failure, or when projects
+  share a duplicate or invalid `ProjectGuid` (`WARNING: Duplicate
+  ProjectGuid ... The project will not be analyzed`).
+  `scripts/check_dotnet_projects.py` checks this from the scanner's own
+  output under `.sonarqube/out/`: every per-project directory must contain
+  a `ProjectInfo.xml`, and every project with files to analyze must appear
+  in the `sonar.modules` that `end` passed to the scanner engine. A project
+  that fails before compilation starts, such as a failed restore, leaves no
+  trace there. `build-command`'s exit status catches that case, so don't
+  mask build failures. If a build script does mask one, the project's
+  `.cs` files are still reported as unanalyzed C# (see below).
+  A project excluded on purpose with `<SonarQubeExclude>true</SonarQubeExclude>`
+  is not a failure.
+
+Every failure sets the action's `failure-reason` output to a fixed code
+(`build-command-failed`, `begin-failed`, `end-failed`,
+`no-analyzable-projects`, `project-not-built`, `project-not-analyzed`,
+`build-command-required`, `invalid-sast-config`, `no-report-task`, ...)
+and writes it to the job summary, so a caller can tell an intended block
+from a setup error.
+
+Scope and limits:
+
+- Linux runners and SDK-style projects only. The ephemeral SonarQube
+  stack needs Linux and Docker, so Windows-only MSBuild/.NET Framework
+  builds are out of scope.
+- One `begin`/`end` per invocation. For several solutions, pass a
+  `build-command` (or a script) that builds them all.
+- `.sastrc` `tests.paths` is **rejected** in `dotnet` mode. The scanner
+  ignores `sonar.sources`/`sonar.tests`, and MSBuild decides which projects
+  are tests (a test SDK reference, or `<SonarQubeTestProject>`). The other
+  `.sastrc`/`.sastignore` settings work as in `cli` mode, with paths
+  relative to `project-base-dir`.
+- `sonar.projectBaseDir` is set to `project-base-dir`, so `.sastrc` paths
+  mean the same in both modes. A project outside `project-base-dir` (for
+  example one that `build-command` reaches with `../`) is dropped from the
+  analysis. Point `project-base-dir` at a directory that contains every
+  project you build.
+- This scanner analyzes only what `build-command` compiles. Any `.cs` or
+  `.vb` file under `project-base-dir` that no built project compiled is
+  reported as unanalyzed C# or VB.NET. That covers a second solution the
+  command doesn't build, a project whose restore failed behind `|| true`,
+  and a stray file. The report goes through the same `unanalyzed-languages`
+  output and `fail-on-unanalyzed-languages` input as above, and only warns
+  by default. `bin/`, `obj/`, gitignored files and `.sastrc`/`.sastignore`
+  exclusions are skipped. C, C++, Objective-C and Swift files are reported
+  as in `cli` mode.
+
+  "Compiled" means the file appears in the scanner's own records: the
+  project's `FilesToAnalyze` list, or the Sonar analyzer's
+  `file-metadata.pb`, which lists every file in the compilation. So
+  `<SonarQubeExclude>` counts as compiled, both for a whole project and for
+  a single file (`<Compile Update="X.cs"><SonarQubeExclude>true</SonarQubeExclude></Compile>`).
+  A file kept on disk but removed from the build with
+  `<Compile Remove="X.cs" />` really isn't compiled, so it is reported. To
+  silence that, list its path in `.sastignore` or in `.sastrc`
+  `exclusions.paths`.
+- Coverage import (`sonar.cs.opencover.reportsPaths` and the like) is not
+  supported, so `exclusions.coverage_paths` has no effect on C#.
+- `dotnet-sonarscanner` is pinned in `.config/dotnet-tools.json`, and
+  Dependabot bumps it. It is installed into `RUNNER_TEMP`, and its JRE is
+  cached there too (`/d:sonar.userHome`), which keeps it working on a
+  self-hosted runner whose `/tmp` is `noexec`.
+- The Sonar token is passed as `/d:sonar.token=...` on the `begin` and
+  `end` command lines, because the scanner ignores the `SONAR_TOKEN`
+  environment variable. GitHub Actions masks it in the log, and the script
+  never echoes it. The build can still read it, as the trust note below
+  explains. That is an accepted risk: the token is only valid for the
+  ephemeral SonarQube server, which dies with the job.
+
+**Trust note.** `cli` mode never runs the code it scans. `dotnet` mode
+does: `build-command`, MSBuild targets and NuGet package build scripts all
+run on the runner, beside everything the job holds. Build code can rewrite
+`.sonarqube/` (including the config `end` reads, so it can redirect `end`
+to another server or binary) and, in the same job, the findings files a
+policy step later reads. Build code can also read the Sonar token. The
+action removes `SONAR_TOKEN` from `build-command`'s environment, but that
+is hygiene, not a boundary: the token is still in the parent process's
+environment (`/proc/$PPID/environ`) and on `end`'s command line. With it,
+build code can, for example, mark its own issues resolved on the
+ephemeral server. So `dotnet` mode can't defend the gate against an
+untrusted author within one job:
+
+- Run it automatically only for PRs from branches in the same repository
+  (trusted authors).
+- Run it for PRs from forks only through a maintainer-triggered
+  `workflow_dispatch`, never automatically on `pull_request`. The reusable
+  workflows' support for this is a separate, upcoming change.
+- On self-hosted runners, the caller's fork-PR guard on `runner-type`
+  matters even more, because the PR's build runs on your machine.
+- Check out with `persist-credentials: false`, so the build can't read a
+  `GITHUB_TOKEN` from `.git/config`.
 
 ### Blocking policy
 
@@ -331,6 +458,15 @@ job closed. `.sastrc`/`.sastignore` take precedence over
 `sonar.projectKey`/`sonar.projectBaseDir`/`sonar.working.directory` cannot
 be set from either. `sonar.modules` (multi-module layouts) is not
 supported.
+
+With `scanner-mode: dotnet` the same rules apply, and the supported keys
+reach `dotnet-sonarscanner begin` as `/d:key=value` (the SonarScanner for
+.NET never reads `sonar-project.properties` itself), except
+`sonar.sources` and `sonar.tests`: that scanner ignores both and takes
+sources and test projects from MSBuild, so they are dropped with a
+warning. Dropping them can only widen what is analyzed, never hide a
+finding. (`.sastrc` `tests.paths`, by contrast, fails the job in dotnet
+mode - see above.)
 
 ## Testing
 

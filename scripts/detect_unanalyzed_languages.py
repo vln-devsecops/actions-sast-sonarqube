@@ -30,7 +30,15 @@ Two independent detection sources, combined:
   C++ and Objective-C headers (and see the README for another false-positive
   note on `.m`).
 
-Both sources honor the consumer's `.sastrc` `exclusions.paths` and
+- scanner-mode: dotnet only - C#/VB.NET files the build didn't compile:
+  the SonarScanner for .NET analyzes exactly what build-command compiled,
+  so a second solution it didn't build, a project whose restore failed
+  behind `|| true`, or a stray .cs file would otherwise get a clean
+  result. `detect_uncompiled_dotnet_languages()` compares the same
+  candidate listing against every project's FilesToAnalyze (see
+  check_dotnet_projects.read_compiled_files).
+
+All sources honor the consumer's `.sastrc` `exclusions.paths` and
 `.sastignore` (parsed by build_scan_config.py, reused here rather than
 re-implemented) so a file that's excluded from the real scan isn't reported
 as "unanalyzed" either - it was never meant to be scanned in the first
@@ -71,6 +79,7 @@ import subprocess
 import sys
 
 from build_scan_config import parse_sastignore, parse_sastrc, read_config_file
+from check_dotnet_projects import read_compiled_files
 
 # Matches the scanner's fixed-sentence warning generically, so a future
 # Community Build plugin for some other non-analyzable language (today:
@@ -301,13 +310,55 @@ def detect_extension_languages(base_dir, exclude_patterns=()):
     return sorted(found)
 
 
-def detect_unanalyzed_languages(scanner_log_text, base_dir, exclude_patterns=()):
-    """Combine both detection sources into one sorted, deduplicated list of
-    language names the `cli` scan did not analyze. The two sources are
-    expected to be disjoint in practice (no Community Build plugin logs the
-    C/C++/Objective-C/Swift warning), but the combination dedupes anyway."""
+# scanner-mode: dotnet. The SonarScanner for .NET analyzes only what
+# build-command compiled, so a .cs/.vb file no project compiled was not
+# analyzed - see detect_uncompiled_dotnet_languages().
+DOTNET_EXTENSION_LANGUAGES = {
+    ".cs": "C#",
+    ".vb": "VB.NET",
+}
+
+# MSBuild output directories: generated sources there (AssemblyInfo,
+# GlobalUsings, ...) are build artifacts, not code anyone wrote.
+DOTNET_BUILD_OUTPUT_DIR_NAMES = {"bin", "obj"}
+
+
+def detect_uncompiled_dotnet_languages(base_dir, compiled_files, exclude_patterns=()):
+    """Return the sorted language names (C#, VB.NET) of source files under
+    `base_dir` that are not in `compiled_files` - the real paths of every
+    file the .NET scanner's projects listed in FilesToAnalyze (see
+    check_dotnet_projects.read_compiled_files). Uses the same candidate
+    listing (git ls-files, else a directory walk; PRUNED_DIR_NAMES pruned)
+    and `.sastrc`/`.sastignore` exclusions as the extension scan, and also
+    skips anything under a bin/ or obj/ directory."""
+    exclude_regexes = [_glob_to_regex(pattern) for pattern in exclude_patterns]
+    base_dir = os.fspath(base_dir)
+    found = set()
+    for rel_path in _candidate_relpaths(base_dir):
+        language = DOTNET_EXTENSION_LANGUAGES.get(os.path.splitext(rel_path)[1].lower())
+        if language is None:
+            continue
+        if DOTNET_BUILD_OUTPUT_DIR_NAMES.intersection(rel_path.split("/")[:-1]):
+            continue
+        if any(regex.match(rel_path) for regex in exclude_regexes):
+            continue
+        if os.path.realpath(os.path.join(base_dir, rel_path)) in compiled_files:
+            continue
+        found.add(language)
+    return sorted(found)
+
+
+def detect_unanalyzed_languages(scanner_log_text, base_dir, exclude_patterns=(), compiled_dotnet_files=None):
+    """Combine the detection sources into one sorted, deduplicated list of
+    language names the scan did not analyze. The log and extension sources
+    are expected to be disjoint in practice (no Community Build plugin logs
+    the C/C++/Objective-C/Swift warning), but the combination dedupes
+    anyway. `compiled_dotnet_files` (scanner-mode: dotnet only; None in cli
+    mode) adds C#/VB.NET files the build didn't compile."""
     languages = set(parse_scanner_log(scanner_log_text))
     languages.update(detect_extension_languages(base_dir, exclude_patterns))
+    if compiled_dotnet_files is not None:
+        languages.update(detect_uncompiled_dotnet_languages(base_dir, compiled_dotnet_files, exclude_patterns))
     return sorted(languages)
 
 
@@ -337,6 +388,10 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
         help="Directory both config files must be inside (same as build_scan_config.py's --project-base-dir)",
     )
     parser.add_argument("--out", required=True, help="Path to write the comma-separated language list to (empty file when none)")
+    parser.add_argument(
+        "--dotnet-sonarqube-out",
+        help="scanner-mode: dotnet only - path to <project-base-dir>/.sonarqube/out, to also report C#/VB.NET files the build did not compile",
+    )
     args = parser.parse_args()
 
     with open(args.scanner_log, encoding="utf-8", errors="replace") as f:
@@ -346,13 +401,16 @@ def main():  # pragma: no cover - CLI glue over the above, validated live
         exclude_patterns = load_exclude_patterns(args.config, args.ignore_file, args.config_base_dir)
     except ValueError as e:
         raise SystemExit(f"Invalid SAST config: {e}")
-    languages = detect_unanalyzed_languages(log_text, args.project_base_dir, exclude_patterns)
+    compiled_dotnet_files = None
+    if args.dotnet_sonarqube_out:
+        compiled_dotnet_files = read_compiled_files(args.dotnet_sonarqube_out)
+    languages = detect_unanalyzed_languages(log_text, args.project_base_dir, exclude_patterns, compiled_dotnet_files)
 
     with open(args.out, "w") as f:
         f.write(",".join(languages))
 
     if languages:
-        print(f"Languages not analyzed by sonar-scanner-cli: {', '.join(languages)}", file=sys.stderr)
+        print(f"Languages not analyzed by this scan: {', '.join(languages)}", file=sys.stderr)
 
 
 if __name__ == "__main__":

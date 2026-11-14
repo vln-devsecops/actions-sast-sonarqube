@@ -52,10 +52,12 @@ inputs:
     default: "false"
   fail-on-unanalyzed-languages:
     description: >-
-      Set "true" to fail this action when project-base-dir contains files in
-      a language the plain sonar-scanner-cli can't analyze (C#, VB.NET - not
-      covered without the Scanner for .NET; C, C++, Objective-C, Swift - no
-      Community Build plugin at all; see scripts/detect_unanalyzed_languages.py
+      Set "true" to fail this action when project-base-dir contains files
+      this scan did not analyze: with scanner-mode "cli", C# and VB.NET (not
+      covered without the Scanner for .NET); with scanner-mode "dotnet", C#
+      and VB.NET files build-command did not compile; in both modes C, C++,
+      Objective-C, Swift (no Community Build plugin at all; see
+      scripts/detect_unanalyzed_languages.py
       and the unanalyzed-languages output below). The findings-json and
       findings-report outputs are still produced first, so callers that read
       them with `if: always()` still get a result. Default "false": warn
@@ -64,6 +66,51 @@ inputs:
       comment), so a clean result is never shown silently, without yet
       failing existing @v1 callers that have incidental files in one of
       these languages.
+    required: false
+    default: "false"
+  scanner-mode:
+    description: >-
+      Which scanner to run. "cli" (the default, unchanged): sonar-scanner-cli
+      in Docker - no build, but it cannot analyze C#/VB.NET. "dotnet": the
+      SonarScanner for .NET on the runner (`begin`, build-command, `end`,
+      all from project-base-dir) - the only way C# is actually analyzed.
+      dotnet mode is Linux runners and SDK-style projects only, and RUNS
+      build-command - the code under scan - on the runner; see the README's
+      trust note before using it on pull requests from forks. It fails if
+      build-command, `begin` or `end` fail, or if any project the build
+      touched was not analyzed (a partially failed build, a duplicate or
+      invalid ProjectGuid). .sastrc `tests.paths` is rejected in this mode
+      (MSBuild decides which projects are tests), and coverage import is
+      not supported.
+    required: false
+    default: cli
+  build-command:
+    description: >-
+      Required with scanner-mode "dotnet", rejected otherwise. A shell
+      command that builds the code to analyze, e.g. "dotnet build
+      MySolution.sln". Run with `bash -c` from project-base-dir, between
+      the scanner's `begin` and `end` steps. SONAR_TOKEN is removed from its
+      environment as hygiene only - build code can still read the token
+      (e.g. from the parent process's environment); see the README's trust
+      note. One begin/end per invocation: for several solutions,
+      pass a command (or script) that builds them all. A non-zero exit
+      fails the action.
+    required: false
+    default: ""
+  dotnet-version:
+    description: >-
+      .NET SDK version(s) for actions/setup-dotnet, which runs only with
+      scanner-mode "dotnet". Must be able to build the project.
+    required: false
+    default: "10.0.x"
+  import-roslyn-issues:
+    description: >-
+      scanner-mode "dotnet" only. Set "true" to also import issues from the
+      project's own Roslyn analyzers (StyleCop, CA*, compiler warnings) as
+      external issues. Default "false": only Sonar's own C# rules
+      (sonar.cs.roslyn.ignoreIssues=true) - a repo's own analyzers are
+      already enforced by its build, and imported they can drown the
+      findings.
     required: false
     default: "false"
 
@@ -88,6 +135,22 @@ outputs:
       findings above say nothing about these files: they were not analyzed,
       not analyzed-and-clean.
     value: ${{ steps.scan.outputs.unanalyzed-languages }}
+  failure-reason:
+    description: >-
+      Empty on success. When the scan step fails, a fixed reason code naming
+      why (see scripts/run_scan.sh's `fail` calls). Input and setup:
+      invalid-scanner-mode, build-command-required,
+      build-command-not-allowed, project-base-dir-missing,
+      workspace-inaccessible, project-base-dir-outside-workspace (resolves
+      outside GITHUB_WORKSPACE), invalid-sast-config (a .sastrc,
+      .sastignore or sonar-project.properties rejected - before the scan,
+      or when detection re-reads them after it). dotnet mode:
+      scanner-install-failed, begin-failed, build-command-failed,
+      end-failed, no-analyzable-projects, check-failed, project-not-built,
+      project-not-analyzed. cli mode: scanner-failed. Either mode:
+      no-report-task, ce-task-failed, ce-task-timeout. Also written to the
+      job summary. Lets a caller tell an intended block from a setup error.
+    value: ${{ steps.scan.outputs.failure-reason }}
 
 runs:
   using: composite
@@ -100,6 +163,14 @@ runs:
     - name: Install Python dependencies
       shell: bash
       run: pip install -r "${{ github.action_path }}/requirements.txt"
+
+    - name: Set up .NET SDK
+      # Explicit comparison, never a bare truthy `if: ${{ inputs.x }}`: any
+      # non-empty string (including "false") is truthy there.
+      if: inputs.scanner-mode == 'dotnet'
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
 
     - name: Run SonarQube scan
       id: scan
@@ -114,6 +185,11 @@ runs:
         SAST_CONFIG_FILE: ${{ inputs.project-base-dir }}/${{ inputs.sast-config-path }}
         SAST_IGNORE_FILE: ${{ inputs.project-base-dir }}/${{ inputs.sast-ignore-path }}
         SCM_DISABLED: ${{ inputs.scm-disabled }}
+        SCANNER_MODE: ${{ inputs.scanner-mode }}
+        # Passed via env only - never interpolate build-command into `run:`
+        # (script injection); run_scan.sh hands it to `bash -c` as-is.
+        BUILD_COMMAND: ${{ inputs.build-command }}
+        IMPORT_ROSLYN_ISSUES: ${{ inputs.import-roslyn-issues }}
       run: "${{ github.action_path }}/scripts/run_scan.sh"
 
     - name: Fetch and normalize findings
@@ -165,7 +241,7 @@ runs:
       run: |
         set -euo pipefail
         if [[ -n "$UNANALYZED_LANGUAGES" ]]; then
-          message="This scan did NOT analyze: ${UNANALYZED_LANGUAGES} - sonar-scanner-cli cannot analyze these languages, so the absence of findings above says nothing about these files."
+          message="This scan did NOT analyze: ${UNANALYZED_LANGUAGES} - this scan's scanner can't analyze these languages, or (scanner-mode: dotnet) build-command didn't compile these files, so the absence of findings above says nothing about these files."
           echo "::warning::${message}"
           {
             echo "### SonarQube Community: languages not analyzed"

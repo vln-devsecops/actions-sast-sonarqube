@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Sonar's documented per-project exclusion: built, deliberately not
+       analyzed. The scan must still succeed (and analyze Normal/). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <SonarQubeExclude>true</SonarQubeExclude>
+  </PropertyGroup>
+
+</Project>

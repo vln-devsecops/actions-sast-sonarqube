@@ -54,9 +54,9 @@ def render_body(result, baseline_tier, baseline_counts, removed_counts):
     unanalyzed_languages = result.get("unanalyzed_languages") or []
     if unanalyzed_languages:
         lines.append(
-            f"**Not analyzed:** {', '.join(unanalyzed_languages)}. sonar-scanner-cli cannot "
-            "analyze these languages - these files were NOT analyzed, so the result below "
-            "says nothing about them."
+            f"**Not analyzed:** {', '.join(unanalyzed_languages)}. This scan's scanner can't "
+            "analyze these languages, or (scanner-mode: dotnet) build-command didn't compile "
+            "these files - they were NOT analyzed, so the result below says nothing about them."
         )
         lines.append("")
     if result["blocked"]:

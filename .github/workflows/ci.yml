@@ -38,6 +38,208 @@ jobs:
         with:
           scandir: ./scripts
 
+  # scanner-mode: dotnet end to end against fixtures-dotnet/ (kept out of
+  # fixtures/, which the cli-mode jobs below scan). The happy path must
+  # produce the pinned SonarC# rule keys; each bad case must FAIL the
+  # action - continue-on-error plus an explicit outcome check, so this job
+  # only stays green if the control actually blocks. The bad cases run
+  # after the happy path in the same job, so a bad case can't "fail" just
+  # because the .NET/SonarQube setup itself is broken.
+  dotnet-e2e:
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Raise vm.max_map_count for Elasticsearch
+        run: sudo sysctl -w vm.max_map_count=262144
+
+      - name: Start ephemeral SonarQube stack
+        run: docker compose -f docker-compose.ephemeral.yml up -d
+
+      - name: Wait for SonarQube to be ready
+        run: ./scripts/wait_for_sonarqube.sh http://localhost:9000
+
+      - name: Bootstrap admin token
+        id: bootstrap
+        run: |
+          token="$(./scripts/bootstrap_sonarqube.sh http://localhost:9000 gha-dotnet-e2e)"
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "$GITHUB_OUTPUT"
+
+      - name: Scan fixtures-dotnet/tiny (dotnet mode)
+        id: tiny
+        uses: ./
+        with:
+          sonar-token: ${{ steps.bootstrap.outputs.token }}
+          project-key: dotnet-tiny
+          project-base-dir: fixtures-dotnet/tiny
+          scm-disabled: "true"
+          scanner-mode: dotnet
+          build-command: dotnet build Tiny.slnx
+
+      - name: Assert pinned SonarC# rule keys are present
+        env:
+          FINDINGS_JSON: ${{ steps.tiny.outputs.findings-json }}
+          UNANALYZED_LANGUAGES: ${{ steps.tiny.outputs.unanalyzed-languages }}
+        run: |
+          set -euo pipefail
+          jq -r '.[].rule' "$FINDINGS_JSON" | sort | uniq -c
+          for rule in csharpsquid:S1144 csharpsquid:S1313; do
+            if ! jq -e --arg rule "$rule" 'any(.[]; .rule == $rule)' "$FINDINGS_JSON" > /dev/null; then
+              echo "::error::expected ${rule} in ${FINDINGS_JSON}"
+              exit 1
+            fi
+          done
+          # Sonar's own rules only by default (import-roslyn-issues: false).
+          if jq -e 'any(.[]; .rule | startswith("external_"))' "$FINDINGS_JSON" > /dev/null; then
+            echo "::error::external Roslyn issues were imported with import-roslyn-issues unset"
+            exit 1
+          fi
+          if [[ -n "$UNANALYZED_LANGUAGES" ]]; then
+            echo "::error::dotnet mode reported unanalyzed languages: ${UNANALYZED_LANGUAGES}"
+            exit 1
+          fi
+
+      - name: "Bad case: broken build"
+        id: broken_build
+        continue-on-error: true
+        uses: ./
+        with:
+          sonar-token: ${{ steps.bootstrap.outputs.token }}
+          project-key: dotnet-broken-build
+          project-base-dir: fixtures-dotnet/broken-build
+          scm-disabled: "true"
+          scanner-mode: dotnet
+          build-command: dotnet build Broken/Broken.csproj
+
+      - name: "Bad case: partial build (one project broken, failure swallowed)"
+        id: partial_build
+        continue-on-error: true
+        uses: ./
+        with:
+          sonar-token: ${{ steps.bootstrap.outputs.token }}
+          project-key: dotnet-partial-build
+          project-base-dir: fixtures-dotnet/partial-build
+          scm-disabled: "true"
+          scanner-mode: dotnet
+          # `|| true` on purpose: a build script that masks a failure. The
+          # unmasked case is the broken-build step above; this one proves
+          # the skipped-project check, since `end` itself exits 0 here.
+          build-command: dotnet build PartialBuild.slnx || true
+
+      - name: "Bad case: zero C# compiled"
+        id: no_csharp
+        continue-on-error: true
+        uses: ./
+        with:
+          sonar-token: ${{ steps.bootstrap.outputs.token }}
+          project-key: dotnet-no-csharp
+          project-base-dir: fixtures-dotnet/no-csharp
+          scm-disabled: "true"
+          scanner-mode: dotnet
+          build-command: dotnet build Empty/Empty.csproj
+
+      - name: "Bad case: duplicate ProjectGuid"
+        id: duplicate_guid
+        continue-on-error: true
+        uses: ./
+        with:
+          sonar-token: ${{ steps.bootstrap.outputs.token }}
+          project-key: dotnet-duplicate-guid
+          project-base-dir: fixtures-dotnet/duplicate-guid
+          scm-disabled: "true"
+          scanner-mode: dotnet
+          build-command: dotnet build DuplicateGuid.slnx
+
+      - name: "Bad case: dotnet mode without build-command"
+        id: no_build_command
+        continue-on-error: true
+        uses: ./
+        with:
+          sonar-token: ${{ steps.bootstrap.outputs.token }}
+          project-key: dotnet-no-build-command
+          project-base-dir: fixtures-dotnet/tiny
+          scanner-mode: dotnet
+
+      - name: Assert every bad case failed the action for the expected reason
+        # Outcome alone isn't enough: a typo'd fixture path, a setup-dotnet
+        # failure or a bad token would fail too. failure-reason is a fixed
+        # code run_scan.sh sets on each failure path.
+        env:
+          BROKEN_BUILD: ${{ steps.broken_build.outcome }}|${{ steps.broken_build.outputs.failure-reason }}|build-command-failed
+          PARTIAL_BUILD: ${{ steps.partial_build.outcome }}|${{ steps.partial_build.outputs.failure-reason }}|project-not-built
+          NO_CSHARP: ${{ steps.no_csharp.outcome }}|${{ steps.no_csharp.outputs.failure-reason }}|no-analyzable-projects
+          DUPLICATE_GUID: ${{ steps.duplicate_guid.outcome }}|${{ steps.duplicate_guid.outputs.failure-reason }}|project-not-analyzed
+          NO_BUILD_COMMAND: ${{ steps.no_build_command.outcome }}|${{ steps.no_build_command.outputs.failure-reason }}|build-command-required
+        run: |
+          set -euo pipefail
+          status=0
+          for case in BROKEN_BUILD PARTIAL_BUILD NO_CSHARP DUPLICATE_GUID NO_BUILD_COMMAND; do
+            IFS='|' read -r outcome reason expected <<< "${!case}"
+            echo "${case}: outcome=${outcome} failure-reason=${reason} (expected ${expected})"
+            if [[ "$outcome" != "failure" || "$reason" != "$expected" ]]; then
+              echo "::error::${case} should have failed with failure-reason ${expected}, got outcome '${outcome}', failure-reason '${reason}'"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      # Not bad cases - these must succeed.
+      - name: "Excluded project (<SonarQubeExclude>) does not fail the scan"
+        id: excluded_project
+        uses: ./
+        with:
+          sonar-token: ${{ steps.bootstrap.outputs.token }}
+          project-key: dotnet-excluded-project
+          project-base-dir: fixtures-dotnet/excluded-project
+          scm-disabled: "true"
+          scanner-mode: dotnet
+          build-command: dotnet build ExcludedProject.slnx
+
+      - name: "C# build-command didn't compile is reported as unanalyzed"
+        id: stray_csharp
+        uses: ./
+        with:
+          sonar-token: ${{ steps.bootstrap.outputs.token }}
+          project-key: dotnet-stray-csharp
+          project-base-dir: fixtures-dotnet/stray-csharp
+          scm-disabled: "true"
+          scanner-mode: dotnet
+          build-command: dotnet build App/App.csproj
+
+      - name: Assert excluded and stray-C# results
+        env:
+          EXCLUDED_FINDINGS: ${{ steps.excluded_project.outputs.findings-json }}
+          EXCLUDED_UNANALYZED: ${{ steps.excluded_project.outputs.unanalyzed-languages }}
+          STRAY_UNANALYZED: ${{ steps.stray_csharp.outputs.unanalyzed-languages }}
+        run: |
+          set -euo pipefail
+          # Normal/ analyzed, Excluded/ not.
+          jq -e 'any(.[]; .path == "Normal/Normal.cs")' "$EXCLUDED_FINDINGS" > /dev/null
+          if jq -e 'any(.[]; .path | startswith("Excluded/"))' "$EXCLUDED_FINDINGS" > /dev/null; then
+            echo "::error::findings reported for the <SonarQubeExclude> project"
+            exit 1
+          fi
+          # Excluded/ was compiled, so it isn't "unanalyzed C#" either.
+          if [[ -n "$EXCLUDED_UNANALYZED" ]]; then
+            echo "::error::excluded-project reported unanalyzed languages: ${EXCLUDED_UNANALYZED}"
+            exit 1
+          fi
+          if [[ "$STRAY_UNANALYZED" != "C#" ]]; then
+            echo "::error::stray-csharp should report unanalyzed-languages=C#, got '${STRAY_UNANALYZED}'"
+            exit 1
+          fi
+
+      - name: Tear down ephemeral SonarQube stack
+        if: always()
+        run: docker compose -f docker-compose.ephemeral.yml down -v
+
   baseline:
     if: github.event_name == 'push'
     needs: unit-tests

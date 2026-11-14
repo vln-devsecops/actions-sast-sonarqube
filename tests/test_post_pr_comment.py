@@ -120,6 +120,14 @@ def test_render_body_shows_unanalyzed_languages_banner():
     assert "VB.NET" in body
 
 
+def test_render_body_banner_wording_is_scanner_mode_neutral():
+    body = render_body(
+        result(unanalyzed_languages=["C#"]), "fallback", severity_counts(), severity_counts(),
+    )
+    assert "sonar-scanner-cli" not in body
+    assert "build-command" in body
+
+
 def test_render_body_banner_appears_before_the_blocked_line():
     body = render_body(
         result(blocked=True, total_new_findings=1, unanalyzed_languages=["Swift"]),

@@ -5,6 +5,7 @@ import pytest
 
 from detect_unanalyzed_languages import (
     detect_extension_languages,
+    detect_uncompiled_dotnet_languages,
     detect_unanalyzed_languages,
     load_exclude_patterns,
     parse_scanner_log,
@@ -525,6 +526,92 @@ def test_detect_unanalyzed_languages_dedupes_overlap(tmp_path):
     log = "\n".join([CSHARP_WARN_LINE, CSHARP_WARN_LINE])
     result = detect_unanalyzed_languages(log, tmp_path)
     assert result == ["C", "C#"]
+
+
+# Trimmed from a real `dotnet-sonarscanner end` log (12.1.0, SonarQube 26.8)
+# - the log run_scan.sh passes in for scanner-mode: dotnet.
+DOTNET_END_LOG = """\
+15:23:13.295  WARNING: WARN: SCM provider autodetection failed. Please use "sonar.scm.provider" to define SCM of your project, or disable the SCM Sensor in the project settings.
+15:23:14.721  INFO: Sensor C# Project Type Information [csharp]
+15:23:14.724  INFO: Sensor C# Project Type Information [csharp] (done) | time=2ms
+15:23:16.100  INFO: ANALYSIS SUCCESSFUL, you can find the results at: http://localhost:9000/dashboard?id=k
+"""
+
+
+def test_detect_unanalyzed_languages_dotnet_mode_does_not_report_csharp_or_vbnet(tmp_path):
+    _touch(tmp_path / "Tiny.Core" / "Greeter.cs")
+    _touch(tmp_path / "Legacy" / "Module1.vb")
+    assert detect_unanalyzed_languages(DOTNET_END_LOG, tmp_path) == []
+
+
+def test_detect_unanalyzed_languages_dotnet_mode_still_reports_extension_languages(tmp_path):
+    _touch(tmp_path / "Tiny.Core" / "Greeter.cs")
+    _touch(tmp_path / "native" / "interop.cpp")
+    assert detect_unanalyzed_languages(DOTNET_END_LOG, tmp_path) == ["C++"]
+
+
+# --- detect_uncompiled_dotnet_languages (scanner-mode: dotnet) -------------
+# The .NET scanner only analyzes what build-command compiled. A .cs/.vb
+# file under project-base-dir that no project's FilesToAnalyze lists (a
+# second solution the build didn't build, a project whose restore failed
+# behind `|| true`, a stray file) was not analyzed.
+
+
+def _compiled(*paths):
+    return {os.path.realpath(p) for p in paths}
+
+
+def test_detect_uncompiled_dotnet_languages_all_compiled(tmp_path):
+    _touch(tmp_path / "App" / "App.cs")
+    assert detect_uncompiled_dotnet_languages(tmp_path, _compiled(tmp_path / "App" / "App.cs")) == []
+
+
+def test_detect_uncompiled_dotnet_languages_reports_stray_csharp(tmp_path):
+    _touch(tmp_path / "App" / "App.cs")
+    _touch(tmp_path / "Unbuilt" / "Unbuilt.cs")
+    assert detect_uncompiled_dotnet_languages(tmp_path, _compiled(tmp_path / "App" / "App.cs")) == ["C#"]
+
+
+def test_detect_uncompiled_dotnet_languages_reports_stray_vbnet(tmp_path):
+    _touch(tmp_path / "Legacy" / "Module1.vb")
+    assert detect_uncompiled_dotnet_languages(tmp_path, set()) == ["VB.NET"]
+
+
+def test_detect_uncompiled_dotnet_languages_ignores_bin_obj_and_sonarqube(tmp_path):
+    _touch(tmp_path / "App" / "obj" / "Debug" / "net10.0" / "App.AssemblyInfo.cs")
+    _touch(tmp_path / "App" / "bin" / "Debug" / "Gen.cs")
+    _touch(tmp_path / ".sonarqube" / "conf" / "x.cs")
+    _touch(tmp_path / ".baseline-checkout" / "Old.cs")
+    assert detect_uncompiled_dotnet_languages(tmp_path, set()) == []
+
+
+def test_detect_uncompiled_dotnet_languages_honors_exclusions(tmp_path):
+    _touch(tmp_path / "samples" / "Sample.cs")
+    assert detect_uncompiled_dotnet_languages(tmp_path, set(), exclude_patterns=["samples/**"]) == []
+
+
+def test_detect_uncompiled_dotnet_languages_in_git_repo_honors_gitignore(tmp_path):
+    _init_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("generated/\n")
+    _touch(tmp_path / "generated" / "Gen.cs")
+    assert detect_uncompiled_dotnet_languages(tmp_path, set()) == []
+
+
+def test_detect_unanalyzed_languages_dotnet_mode_reports_uncompiled_csharp(tmp_path):
+    _touch(tmp_path / "App" / "App.cs")
+    _touch(tmp_path / "Unbuilt" / "Unbuilt.cs")
+    _touch(tmp_path / "native" / "interop.cpp")
+    result = detect_unanalyzed_languages(
+        DOTNET_END_LOG, tmp_path, compiled_dotnet_files=_compiled(tmp_path / "App" / "App.cs")
+    )
+    assert result == ["C#", "C++"]
+
+
+def test_detect_unanalyzed_languages_cli_mode_ignores_compiled_files_check(tmp_path):
+    # compiled_dotnet_files=None (cli mode): .cs files alone are not
+    # reported - the CLI's own log line is the cli-mode signal.
+    _touch(tmp_path / "App" / "App.cs")
+    assert detect_unanalyzed_languages("", tmp_path) == []
 
 
 def test_detect_unanalyzed_languages_respects_exclusion_patterns(tmp_path):
