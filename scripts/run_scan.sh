@@ -351,11 +351,17 @@ fi
 # project's FilesToAnalyze lists (a solution build-command didn't build, a
 # project whose restore failed behind `|| true`, a stray file) is reported
 # as unanalyzed C#/VB.NET, alongside the extension scan (C, C++,
-# Objective-C, Swift). This never fails the scan itself: it only produces
-# a result that action.yml surfaces (warning annotation, job summary,
-# report banner, Check Run/comment, and the fail-on-unanalyzed-languages
-# input) after the findings and report outputs further downstream are
-# written.
+# Objective-C, Swift). Finding unanalyzed languages never fails the scan
+# itself: it only produces a result that action.yml surfaces (warning
+# annotation, job summary, report banner, Check Run/comment, and the
+# fail-on-unanalyzed-languages input) after the findings and report
+# outputs further downstream are written.
+# Detection does fail the scan if it can't read .sastrc/.sastignore safely:
+# it re-reads them through read_config_file(), and a file that has become a
+# symbolic link (or otherwise invalid) since build_scan_config.py read it -
+# in dotnet mode, build-command runs in between and could swap one - is
+# rejected the same way, rather than silently detecting without the
+# consumer's exclusions.
 detect_args=(
   --scanner-log "$SCANNER_LOG_FILE"
   --project-base-dir "$ABS_PROJECT_BASE_DIR"
@@ -367,7 +373,9 @@ detect_args=(
 if [[ "$SCANNER_MODE" == "dotnet" ]]; then
   detect_args+=(--dotnet-sonarqube-out "${ABS_PROJECT_BASE_DIR}/.sonarqube/out")
 fi
-python3 "${SCRIPTS_DIR}/detect_unanalyzed_languages.py" "${detect_args[@]}"
+if ! python3 "${SCRIPTS_DIR}/detect_unanalyzed_languages.py" "${detect_args[@]}"; then
+  fail invalid-sast-config "Rejected the SAST config while detecting unanalyzed languages (see the error above)."
+fi
 UNANALYZED_LANGUAGES="$(cat "$UNANALYZED_LANGUAGES_FILE")"
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   echo "unanalyzed-languages=${UNANALYZED_LANGUAGES}" >> "$GITHUB_OUTPUT"
