@@ -119,3 +119,38 @@ code (`sonarqube-service-not-running`, `sonarqube-network-ambiguous`,
 `sonarqube-service-ambiguous` - see action.yml's `failure-reason` output):
 that is evidence the lookup itself (or the stack) is broken, not evidence
 there simply isn't a compose stack to join.
+
+## Confining `project-base-dir`: workspace vs. checkout root
+
+`run_scan.sh` resolves `PROJECT_BASE_DIR` to its physical path (`pwd -P`)
+and refuses to proceed if that path lies outside a confinement root - so a
+checked-out symlink is mounted (and scanned) as the real directory it
+points at, never silently followed past a boundary this action means to
+enforce.
+
+Before `CHECKOUT_ROOT` existed, that root was always `GITHUB_WORKSPACE`.
+That is still correct for a direct action user with one checkout: nothing
+else lives in the workspace for a symlink to reach. It stopped being
+correct for `sonar-pr.yml`/`sonar-baseline.yml`, though: both check the
+caller's own code out into `./src`, with this action's own source
+(`.sast-sonarqube`) and the fallback baseline checkout
+(`.baseline-checkout`) as sibling directories under the same
+`GITHUB_WORKSPACE`. A symlink committed into the caller's repository
+(`src/<project-base-dir> -> ../.sast-sonarqube`, say) resolves to one of
+those siblings, not to anything under `src` - and a bare `GITHUB_WORKSPACE`
+check can't tell that apart from a legitimate path, because the resolved
+target is still inside the workspace. The scanner would then mount and
+scan this action's own source (or the fallback baseline checkout) as if it
+were the caller's code.
+
+`CHECKOUT_ROOT`, when set, narrows the confinement boundary from the whole
+workspace down to one checkout root, resolved physically the same way as
+`PROJECT_BASE_DIR` itself. Both reusable workflows set it on every step
+that invokes the scanner: `src` for the PR head scan and the baseline
+scan, `.baseline-checkout` for the fallback baseline scan -
+`tests/test_workflow_hardening.py` pins that every such step's
+`checkout-root` matches the sibling directory its own `project-base-dir`
+is rooted under. Left unset - every direct action user by default - the
+check falls back to `GITHUB_WORKSPACE`, unchanged from before this input
+existed. Outside Actions, with neither set, there is no root to confine
+to and the check is skipped entirely, same as always.

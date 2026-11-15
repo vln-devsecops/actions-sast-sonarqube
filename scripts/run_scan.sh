@@ -22,7 +22,12 @@
 #                SAST_CONFIG_FILE, SAST_IGNORE_FILE (paths to the consumer's
 #                optional .sastrc / .sastignore noise-reduction files - need
 #                not exist)
-# Optional env:  SCAN_TIMEOUT_SECONDS (default 600), SCM_DISABLED (default false -
+# Optional env:  CHECKOUT_ROOT (confines PROJECT_BASE_DIR to this directory
+#                instead of GITHUB_WORKSPACE - see the "Confine
+#                PROJECT_BASE_DIR" comment below for why a reusable
+#                workflow sets this and a direct action user normally
+#                doesn't need to),
+#                SCAN_TIMEOUT_SECONDS (default 600), SCM_DISABLED (default false -
 #                set "true" to pass sonar.scm.disabled=true, for a shallow
 #                checkout where blame data isn't available),
 #                SCANNER_MODE (cli | dotnet, default cli),
@@ -99,12 +104,43 @@ fi
 # exactly the directory that was checked, not a symbolic link to it.
 ABS_PROJECT_BASE_DIR="$(cd "$PROJECT_BASE_DIR" && pwd -P)"
 
-# Under GitHub Actions, the directory to scan must be inside the workspace.
-# Outside Actions (e.g. a manual local run) there is no workspace to
-# confine to, so this check is skipped. It runs before the cli/dotnet
-# split, so both scanner modes (and dotnet mode's build-command, which runs
-# from this directory) are confined the same way.
-if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
+# Confine PROJECT_BASE_DIR to a single root, resolved physically the same
+# way (pwd -P), so a checked-out symlink that resolves inside the chosen
+# root but points somewhere this job doesn't mean to scan is refused
+# rather than silently mounted and scanned. Two roots, tried in order:
+#
+#   CHECKOUT_ROOT (optional, unset for a direct action user by default):
+#   set by a caller that itself checks out several directories as siblings
+#   under one GITHUB_WORKSPACE - the reusable workflows check the caller's
+#   own code out into ./src, with this action's own source
+#   (.sast-sonarqube) and the fallback baseline checkout
+#   (.baseline-checkout) as further siblings (see
+#   .github/workflows/sonar-pr.yml and sonar-baseline.yml). A bare
+#   GITHUB_WORKSPACE check is too wide there: a symlink committed into the
+#   caller's own checkout (e.g. src/<project-base-dir> ->
+#   ../.sast-sonarqube) still resolves inside the workspace and would pass
+#   it, even though it points at a directory the caller never meant to
+#   have scanned. CHECKOUT_ROOT narrows the boundary to the caller's own
+#   checkout instead - set it to that checkout's own root (./src for the
+#   PR head and baseline scans, ./.baseline-checkout for the fallback
+#   baseline scan).
+#
+#   GITHUB_WORKSPACE (today's behaviour, unchanged for every caller that
+#   doesn't set CHECKOUT_ROOT): the whole job workspace. Outside Actions
+#   (e.g. a manual local run) with neither set, there is no root to
+#   confine to, so this check is skipped entirely.
+#
+# Either way this runs before the cli/dotnet split, so both scanner modes
+# (and dotnet mode's build-command, which runs from this directory) are
+# confined the same way.
+if [[ -n "${CHECKOUT_ROOT:-}" ]]; then
+  if ! ABS_CHECKOUT_ROOT="$(cd "$CHECKOUT_ROOT" && pwd -P)"; then
+    fail checkout-root-inaccessible "CHECKOUT_ROOT '${CHECKOUT_ROOT}' is not an accessible directory."
+  fi
+  if [[ "$ABS_PROJECT_BASE_DIR" != "$ABS_CHECKOUT_ROOT" && "$ABS_PROJECT_BASE_DIR" != "$ABS_CHECKOUT_ROOT"/* ]]; then
+    fail project-base-dir-outside-checkout "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' resolves to '${ABS_PROJECT_BASE_DIR}', outside CHECKOUT_ROOT '${ABS_CHECKOUT_ROOT}'."
+  fi
+elif [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
   if ! ABS_WORKSPACE="$(cd "$GITHUB_WORKSPACE" && pwd -P)"; then
     fail workspace-inaccessible "GITHUB_WORKSPACE '${GITHUB_WORKSPACE}' is not an accessible directory."
   fi

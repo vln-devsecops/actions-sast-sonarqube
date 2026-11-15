@@ -561,6 +561,7 @@ jobs:
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: ${{ inputs.project-key }}-fallback-base
           project-base-dir: .baseline-checkout/${{ inputs.project-base-dir }}
+          checkout-root: .baseline-checkout
           sast-config-path: ${{ inputs.sast-config-path }}
           sast-ignore-path: ${{ inputs.sast-ignore-path }}
           scm-disabled: ${{ inputs.baseline-scm-history && 'false' || 'true' }}
@@ -650,6 +651,7 @@ jobs:
           # head" above), so prefix it here rather than changing what the
           # input means to callers.
           project-base-dir: src/${{ inputs.project-base-dir }}
+          checkout-root: src
           sast-config-path: ${{ inputs.sast-config-path }}
           sast-ignore-path: ${{ inputs.sast-ignore-path }}
           fail-on-unanalyzed-languages: ${{ inputs.fail-on-unanalyzed-languages }}

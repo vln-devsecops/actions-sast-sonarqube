@@ -320,6 +320,17 @@ untrusted author within one job:
   `cp`/`mv`, `-o` and output flags in `run:` blocks (following local
   variables) that bypass `$RUNNER_TEMP`; other write forms need manual
   review.
+- Because those sibling directories live under the same `GITHUB_WORKSPACE`
+  as `src`, a symlink committed into the PR's own checkout
+  (`src/<project-base-dir> -> ../.sast-sonarqube`, say) would still resolve
+  inside the workspace - a confinement check against `GITHUB_WORKSPACE`
+  alone can't tell that apart from a legitimate path. Both workflows pass
+  the action's `checkout-root` input on every scan they run (`src` for the
+  PR head and baseline scans, `.baseline-checkout` for the fallback
+  baseline scan), so `run_scan.sh` confines `project-base-dir` to that
+  checkout instead of the whole workspace. A direct action user who
+  doesn't set `checkout-root` keeps today's `GITHUB_WORKSPACE`-wide
+  confinement, unchanged - see `docs/design.md`.
 
 #### Fork PRs in `scanner-mode: dotnet`
 

@@ -32,6 +32,21 @@ inputs:
   project-base-dir:
     description: Path to the checked-out project to scan.
     required: true
+  checkout-root:
+    description: >-
+      Optional. Confines the resolved project-base-dir to this directory
+      instead of GITHUB_WORKSPACE - set this when your own checkout step
+      puts the code under a subdirectory alongside other checkouts (e.g. a
+      reusable workflow's own source, or a second checkout used as a
+      comparison baseline), so a symlink inside your checkout can't resolve
+      to one of those other directories and still pass a workspace-wide
+      check. Most direct callers of this action don't need to set this:
+      leaving it empty keeps today's GITHUB_WORKSPACE-wide confinement
+      unchanged. Both of this repo's own reusable workflows
+      (sonar-pr.yml, sonar-baseline.yml) set it to their own checkout root
+      on every scan they run.
+    required: false
+    default: ""
   scan-timeout-seconds:
     description: How long to wait for the SonarQube background compute-engine task to finish.
     required: false
@@ -169,7 +184,10 @@ outputs:
       invalid-scanner-mode, build-command-required,
       build-command-not-allowed, project-base-dir-missing,
       workspace-inaccessible, project-base-dir-outside-workspace (resolves
-      outside GITHUB_WORKSPACE), invalid-sast-config (a .sastrc,
+      outside GITHUB_WORKSPACE), checkout-root-inaccessible (checkout-root
+      is set but not an accessible directory), project-base-dir-outside-checkout
+      (checkout-root is set and project-base-dir resolves outside it - see
+      the checkout-root input), invalid-sast-config (a .sastrc,
       .sastignore or sonar-project.properties rejected - before the scan,
       or when detection re-reads them after it). dotnet mode:
       scanner-install-failed, begin-failed, build-command-failed,
@@ -219,6 +237,7 @@ runs:
         SONAR_TOKEN: ${{ inputs.sonar-token }}
         PROJECT_KEY: ${{ inputs.project-key }}
         PROJECT_BASE_DIR: ${{ inputs.project-base-dir }}
+        CHECKOUT_ROOT: ${{ inputs.checkout-root }}
         SCAN_TIMEOUT_SECONDS: ${{ inputs.scan-timeout-seconds }}
         COMPOSE_FILE: ${{ github.action_path }}/docker-compose.ephemeral.yml
         SAST_CONFIG_FILE: ${{ inputs.project-base-dir }}/${{ inputs.sast-config-path }}

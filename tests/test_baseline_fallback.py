@@ -30,6 +30,8 @@ def test_build_failure_reasons_are_classified_as_build_failures(reason):
         "project-base-dir-missing",
         "project-base-dir-outside-workspace",
         "workspace-inaccessible",
+        "checkout-root-inaccessible",
+        "project-base-dir-outside-checkout",
         "scanner-failed",
         "check-failed",
     ],
