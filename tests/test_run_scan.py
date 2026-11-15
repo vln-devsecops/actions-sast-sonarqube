@@ -12,6 +12,7 @@ to check what run_scan.sh would mount and whether it gets that far at
 all: the GITHUB_WORKSPACE confinement and the project.settings override."""
 import json
 import os
+import platform
 import re
 import shutil
 import stat
@@ -466,6 +467,23 @@ def _pinned_scanner_version():
     return manifest["tools"]["dotnet-sonarscanner"]["version"]
 
 
+# Mirrors run_scan.sh's own `uname -m` -> DOTNET_ROOT_<ARCH> mapping (see
+# https://learn.microsoft.com/dotnet/core/tools/dotnet-environment-variables#dotnet_root-dotnet_rootx86-dotnet_root_x86-dotnet_root_x64),
+# so the "arch-specific variable" spec runs against whatever this test
+# host's own architecture is, on either an x64 or an arm64 runner.
+def _dotnet_root_arch_var():
+    return {
+        "x86_64": "DOTNET_ROOT_X64",
+        "amd64": "DOTNET_ROOT_X64",
+        "aarch64": "DOTNET_ROOT_ARM64",
+        "arm64": "DOTNET_ROOT_ARM64",
+        "armv7l": "DOTNET_ROOT_ARM",
+        "armv6l": "DOTNET_ROOT_ARM",
+        "i386": "DOTNET_ROOT_X86",
+        "i686": "DOTNET_ROOT_X86",
+    }.get(platform.machine())
+
+
 def test_pinned_scanner_version_is_12_1_0():
     assert _pinned_scanner_version() == "12.1.0"
 
@@ -656,6 +674,84 @@ def test_dotnet_still_reports_extension_detected_languages(harness):
     result = _dotnet(harness)
     assert result.returncode == 0, result.stderr
     assert "unanalyzed-languages=C++\n" in harness.github_output.read_text()
+
+
+# --- dotnet mode: locating DOTNET_ROOT for the scanner's apphost -----------------
+# Reproduces vln-devsecops/actions-sast-sonarqube's live failure: the fake
+# `dotnet` the harness puts on PATH is itself an apphost-style executable
+# (just like the real `dotnet-sonarscanner` tool `begin`/`end` install), and
+# this harness's env never sets DOTNET_ROOT (nor any DOTNET_ROOT_<ARCH>) -
+# matching a self-hosted runner whose .NET SDK lives somewhere non-default
+# (e.g. $HOME/.dotnet-csharp) with no actions/setup-dotnet to set it. Per
+# https://learn.microsoft.com/dotnet/core/tools/dotnet-environment-variables#dotnet_root-dotnet_rootx86-dotnet_root_x86-dotnet_root_x64
+# the apphost's own lookup order is DOTNET_ROOT_<ARCH>, then
+# DOTNET_ROOT(x86) (32-bit-on-64-bit-Windows only, not applicable here),
+# then DOTNET_ROOT, then the registered install location, then the OS
+# default (e.g. /usr/share/dotnet on Linux) - so without one of the first
+# three set, a non-default install location is never found.
+
+
+def test_dotnet_root_derived_from_dotnet_on_path(harness):
+    result = _dotnet(harness, BUILD_COMMAND=f"env > {harness.log_dir}/build.env")
+    assert result.returncode == 0, result.stderr
+    bin_dir = harness.env["PATH"].split(os.pathsep, 1)[0]
+    for name in ("dotnet-tool.env", "scanner-begin.env", "scanner-end.env"):
+        env_text = (harness.log_dir / name).read_text()
+        assert f"DOTNET_ROOT={bin_dir}" in env_text, f"{name} missing derived DOTNET_ROOT ({env_text})"
+    build_env = (harness.log_dir / "build.env").read_text()
+    assert f"DOTNET_ROOT={bin_dir}" in build_env
+
+
+def test_dotnet_root_derived_through_a_symlinked_dotnet(harness):
+    # The real-world case: a self-hosted runner's PATH often has `dotnet`
+    # as a symlink (e.g. from update-alternatives, or a version manager)
+    # rather than the SDK's own binary directly - DOTNET_ROOT must resolve
+    # to the symlink's physical target directory, not the symlink's own.
+    bin_dir = Path(harness.env["PATH"].split(os.pathsep, 1)[0])
+    real_dir = harness.tmp_path / "real-dotnet-sdk"
+    real_dir.mkdir()
+    real_dotnet = real_dir / "dotnet"
+    _write_exe(real_dotnet, FAKE_DOTNET)
+    (bin_dir / "dotnet").unlink()
+    (bin_dir / "dotnet").symlink_to(real_dotnet)
+
+    result = _dotnet(harness)
+    assert result.returncode == 0, result.stderr
+    begin_env = (harness.log_dir / "scanner-begin.env").read_text()
+    assert f"DOTNET_ROOT={real_dir}" in begin_env
+    end_env = (harness.log_dir / "scanner-end.env").read_text()
+    assert f"DOTNET_ROOT={real_dir}" in end_env
+
+
+def test_dotnet_root_caller_value_is_kept(harness):
+    result = _dotnet(harness, DOTNET_ROOT="/opt/custom-dotnet")
+    assert result.returncode == 0, result.stderr
+    for name in ("dotnet-tool.env", "scanner-begin.env", "scanner-end.env"):
+        env_text = (harness.log_dir / name).read_text()
+        assert "DOTNET_ROOT=/opt/custom-dotnet" in env_text, f"{name}: {env_text}"
+
+
+def test_dotnet_root_arch_specific_var_set_is_respected(harness):
+    arch_var = _dotnet_root_arch_var()
+    if arch_var is None:
+        pytest.skip(f"no known DOTNET_ROOT_<ARCH> mapping for {platform.machine()}")
+    result = _dotnet(harness, **{arch_var: "/opt/arch-specific-dotnet"})
+    assert result.returncode == 0, result.stderr
+    for name in ("dotnet-tool.env", "scanner-begin.env", "scanner-end.env"):
+        env_text = (harness.log_dir / name).read_text()
+        assert f"{arch_var}=/opt/arch-specific-dotnet" in env_text, f"{name}: {env_text}"
+        # The apphost already consults DOTNET_ROOT_<ARCH> before DOTNET_ROOT
+        # (see docstring above) - this script must not also inject an
+        # unrelated derived DOTNET_ROOT on top of it.
+        assert "DOTNET_ROOT=" not in env_text, f"{name} got an unwanted derived DOTNET_ROOT: {env_text}"
+
+
+def test_cli_mode_is_unaffected_by_dotnet_root_derivation(harness):
+    result = harness.run()
+    assert result.returncode == 0, result.stderr
+    assert harness.args("dotnet-tool.args") is None
+    assert harness.args("scanner-begin.args") is None
+    assert _normalize_cache_mount(harness.args("docker-run.args")) == _expected_cli_args(harness)
 
 
 # --- failure-reason output --------------------------------------------------------
