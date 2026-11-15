@@ -34,17 +34,18 @@ inputs:
     required: true
   checkout-root:
     description: >-
-      Optional. Confines the resolved project-base-dir to this directory
-      instead of GITHUB_WORKSPACE - set this when your own checkout step
-      puts the code under a subdirectory alongside other checkouts (e.g. a
+      Optional. Adds a second, narrower confinement boundary on top of
+      GITHUB_WORKSPACE (not instead of it) for the resolved
+      project-base-dir - set this when your own checkout step puts the
+      code under a subdirectory alongside other checkouts (e.g. a
       reusable workflow's own source, or a second checkout used as a
-      comparison baseline), so a symlink inside your checkout can't resolve
-      to one of those other directories and still pass a workspace-wide
-      check. Most direct callers of this action don't need to set this:
-      leaving it empty keeps today's GITHUB_WORKSPACE-wide confinement
-      unchanged. Both of this repo's own reusable workflows
-      (sonar-pr.yml, sonar-baseline.yml) set it to their own checkout root
-      on every scan they run.
+      comparison baseline), so a symbolic link inside your checkout that
+      resolves to one of those other directories in the same workspace is
+      refused instead of silently scanned. Most direct callers of this
+      action don't need to set this: leaving it empty keeps today's
+      GITHUB_WORKSPACE-wide confinement unchanged. Both of this repo's own
+      reusable workflows (sonar-pr.yml, sonar-baseline.yml) set it to
+      their own checkout root on every scan they run.
     required: false
     default: ""
   scan-timeout-seconds:

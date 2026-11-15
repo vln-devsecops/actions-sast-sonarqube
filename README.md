@@ -321,14 +321,14 @@ untrusted author within one job:
   variables) that bypass `$RUNNER_TEMP`; other write forms need manual
   review.
 - Because those sibling directories live under the same `GITHUB_WORKSPACE`
-  as `src`, a symlink committed into the PR's own checkout
-  (`src/<project-base-dir> -> ../.sast-sonarqube`, say) would still resolve
-  inside the workspace - a confinement check against `GITHUB_WORKSPACE`
-  alone can't tell that apart from a legitimate path. Both workflows pass
-  the action's `checkout-root` input on every scan they run (`src` for the
-  PR head and baseline scans, `.baseline-checkout` for the fallback
-  baseline scan), so `run_scan.sh` confines `project-base-dir` to that
-  checkout instead of the whole workspace. A direct action user who
+  as `src`, a symbolic link inside the caller's checkout that resolves to
+  another directory in the same workspace (this action's source or the
+  baseline checkout) would pass a workspace-wide check. Both workflows
+  pass the action's `checkout-root` input on every scan they run (`src`
+  for the PR head and baseline scans, `.baseline-checkout` for the
+  fallback baseline scan), so `run_scan.sh` also confines
+  `project-base-dir` to that checkout - narrower than, and in addition to,
+  the workspace check above, not instead of it. A direct action user who
   doesn't set `checkout-root` keeps today's `GITHUB_WORKSPACE`-wide
   confinement, unchanged - see `docs/design.md`.
 

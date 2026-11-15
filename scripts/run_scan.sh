@@ -22,11 +22,11 @@
 #                SAST_CONFIG_FILE, SAST_IGNORE_FILE (paths to the consumer's
 #                optional .sastrc / .sastignore noise-reduction files - need
 #                not exist)
-# Optional env:  CHECKOUT_ROOT (confines PROJECT_BASE_DIR to this directory
-#                instead of GITHUB_WORKSPACE - see the "Confine
-#                PROJECT_BASE_DIR" comment below for why a reusable
-#                workflow sets this and a direct action user normally
-#                doesn't need to),
+# Optional env:  CHECKOUT_ROOT (narrows PROJECT_BASE_DIR's confinement to
+#                this directory, in addition to GITHUB_WORKSPACE, not
+#                instead of it - see the "Confine PROJECT_BASE_DIR"
+#                comment below for why a reusable workflow sets this and
+#                a direct action user normally doesn't need to),
 #                SCAN_TIMEOUT_SECONDS (default 600), SCM_DISABLED (default false -
 #                set "true" to pass sonar.scm.disabled=true, for a shallow
 #                checkout where blame data isn't available),
@@ -79,6 +79,17 @@ fail() {
   exit 1
 }
 
+# _dir_is_under <dir> <root>: both already physically resolved (pwd -P) -
+# true when <dir> equals <root> or is a descendant of it. A root of "/"
+# is a special case: "$root/*" would otherwise expand to the glob "//*",
+# which (being two leading slashes, not one) matches no normal absolute
+# path - so every directory would be wrongly reported as outside a "/"
+# root, when everything is in fact under it.
+_dir_is_under() {
+  local dir="$1" root="$2"
+  [[ "$root" == "/" || "$dir" == "$root" || "$dir" == "$root"/* ]]
+}
+
 case "$SCANNER_MODE" in
   cli)
     # Silently ignoring it would let a caller believe their C# was built
@@ -104,48 +115,49 @@ fi
 # exactly the directory that was checked, not a symbolic link to it.
 ABS_PROJECT_BASE_DIR="$(cd "$PROJECT_BASE_DIR" && pwd -P)"
 
-# Confine PROJECT_BASE_DIR to a single root, resolved physically the same
-# way (pwd -P), so a checked-out symlink that resolves inside the chosen
-# root but points somewhere this job doesn't mean to scan is refused
-# rather than silently mounted and scanned. Two roots, tried in order:
+# Confine PROJECT_BASE_DIR, resolved physically the same way (pwd -P), so
+# a checked-out symlink that resolves somewhere this job doesn't mean to
+# scan is refused rather than silently mounted and scanned. Two checks,
+# both applied when their input is set - CHECKOUT_ROOT narrows the
+# boundary, it does not replace GITHUB_WORKSPACE's:
+#
+#   GITHUB_WORKSPACE (today's behaviour, unchanged for every caller):
+#   PROJECT_BASE_DIR must resolve inside the whole job workspace. Outside
+#   Actions (e.g. a manual local run), with GITHUB_WORKSPACE unset, there
+#   is no workspace to confine to, so this check is skipped.
 #
 #   CHECKOUT_ROOT (optional, unset for a direct action user by default):
-#   set by a caller that itself checks out several directories as siblings
-#   under one GITHUB_WORKSPACE - the reusable workflows check the caller's
-#   own code out into ./src, with this action's own source
-#   (.sast-sonarqube) and the fallback baseline checkout
-#   (.baseline-checkout) as further siblings (see
-#   .github/workflows/sonar-pr.yml and sonar-baseline.yml). A bare
-#   GITHUB_WORKSPACE check is too wide there: a symlink committed into the
-#   caller's own checkout (e.g. src/<project-base-dir> ->
-#   ../.sast-sonarqube) still resolves inside the workspace and would pass
-#   it, even though it points at a directory the caller never meant to
-#   have scanned. CHECKOUT_ROOT narrows the boundary to the caller's own
-#   checkout instead - set it to that checkout's own root (./src for the
-#   PR head and baseline scans, ./.baseline-checkout for the fallback
-#   baseline scan).
-#
-#   GITHUB_WORKSPACE (today's behaviour, unchanged for every caller that
-#   doesn't set CHECKOUT_ROOT): the whole job workspace. Outside Actions
-#   (e.g. a manual local run) with neither set, there is no root to
-#   confine to, so this check is skipped entirely.
+#   an additional, narrower boundary - set by a caller whose own checkout
+#   isn't the only thing under GITHUB_WORKSPACE (the reusable workflows
+#   check the caller's own code out into ./src, with this action's own
+#   source and the fallback baseline checkout as further siblings - see
+#   .github/workflows/sonar-pr.yml and sonar-baseline.yml). A symbolic
+#   link inside the caller's checkout that resolves to another directory
+#   in the same workspace (this action's source or the baseline checkout)
+#   would pass a workspace-wide check; CHECKOUT_ROOT, set to the caller's
+#   own checkout root (./src for the PR head and baseline scans,
+#   ./.baseline-checkout for the fallback baseline scan), catches that.
+#   Since it only narrows the boundary, a CHECKOUT_ROOT that itself
+#   resolves outside GITHUB_WORKSPACE (e.g. via a symlink, or a relative
+#   path like "..") still leaves the workspace check in force.
 #
 # Either way this runs before the cli/dotnet split, so both scanner modes
 # (and dotnet mode's build-command, which runs from this directory) are
 # confined the same way.
+if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
+  if ! ABS_WORKSPACE="$(cd "$GITHUB_WORKSPACE" && pwd -P)"; then
+    fail workspace-inaccessible "GITHUB_WORKSPACE '${GITHUB_WORKSPACE}' is not an accessible directory."
+  fi
+  if ! _dir_is_under "$ABS_PROJECT_BASE_DIR" "$ABS_WORKSPACE"; then
+    fail project-base-dir-outside-workspace "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' resolves to '${ABS_PROJECT_BASE_DIR}', outside GITHUB_WORKSPACE '${ABS_WORKSPACE}'."
+  fi
+fi
 if [[ -n "${CHECKOUT_ROOT:-}" ]]; then
   if ! ABS_CHECKOUT_ROOT="$(cd "$CHECKOUT_ROOT" && pwd -P)"; then
     fail checkout-root-inaccessible "CHECKOUT_ROOT '${CHECKOUT_ROOT}' is not an accessible directory."
   fi
-  if [[ "$ABS_PROJECT_BASE_DIR" != "$ABS_CHECKOUT_ROOT" && "$ABS_PROJECT_BASE_DIR" != "$ABS_CHECKOUT_ROOT"/* ]]; then
+  if ! _dir_is_under "$ABS_PROJECT_BASE_DIR" "$ABS_CHECKOUT_ROOT"; then
     fail project-base-dir-outside-checkout "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' resolves to '${ABS_PROJECT_BASE_DIR}', outside CHECKOUT_ROOT '${ABS_CHECKOUT_ROOT}'."
-  fi
-elif [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
-  if ! ABS_WORKSPACE="$(cd "$GITHUB_WORKSPACE" && pwd -P)"; then
-    fail workspace-inaccessible "GITHUB_WORKSPACE '${GITHUB_WORKSPACE}' is not an accessible directory."
-  fi
-  if [[ "$ABS_PROJECT_BASE_DIR" != "$ABS_WORKSPACE" && "$ABS_PROJECT_BASE_DIR" != "$ABS_WORKSPACE"/* ]]; then
-    fail project-base-dir-outside-workspace "PROJECT_BASE_DIR '${PROJECT_BASE_DIR}' resolves to '${ABS_PROJECT_BASE_DIR}', outside GITHUB_WORKSPACE '${ABS_WORKSPACE}'."
   fi
 fi
 
