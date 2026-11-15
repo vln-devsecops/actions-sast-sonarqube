@@ -54,3 +54,68 @@ small YAML schema translated onto the underlying `sonar.*` properties) vs.
 `.sastrc`'s `exclusions.paths` produces) rather than folding both into one
 file, so a consumer who only wants "exclude these paths" doesn't need to
 learn YAML or SonarQube's own property names at all.
+
+## Scanner container isolation (read-only project mount; compose network when available)
+
+`scripts/run_scan.sh` bind-mounts `PROJECT_BASE_DIR` into the scanner
+container read-only (`:ro`). The scanner's own writes (its working
+directory, its cache/JRE under `SONAR_USER_HOME`) all live under the
+separate, writable `SCANNER_CACHE_DIR` mount instead - `sonar.working.directory`
+is pinned to a path under that cache mount rather than under the project,
+and `report-task.txt` is read back from there on the host side
+(`SCANNER_CACHE_DIR/scannerwork/report-task.txt`), not from the project
+directory.
+
+By default - when `SONAR_HOST_URL` is still this action's own default
+(`http://localhost:9000`) *and* a compose `sonarqube` service container
+can be found, running, attached to exactly one docker network - the
+scanner joins that network instead of the host network, reaching
+SonarQube by its compose service name (`http://sonarqube:9000`) -
+a separate, in-container-only URL from the one used host-side (the
+compute-engine `curl` poll, further down the same script, and
+`fetch_findings.py`, both unchanged). `docker compose` prefixes its
+network names with the compose project name, which a caller could
+override (e.g. `-p`/`COMPOSE_PROJECT_NAME`) - rather than assume that
+prefix, the script reads the network's real name back from the running
+`sonarqube` service container itself (`docker compose ... ps -a -q
+sonarqube`, then `docker inspect`).
+
+Three cases fall back to `--network host` (with a `::warning::` that it is
+deprecated and will be removed in a future major version, naming the fix:
+use this action's own compose stack and leave `sonar-host-url` at its
+default) rather than fail the job - all of them mean "there is no compose
+stack for this script to join", not "something is wrong with it":
+
+- `sonar-host-url` is not the default - it is assumed to point somewhere
+  other than this script's own ephemeral stack (which may not even be
+  running under this `COMPOSE_FILE`), so the compose lookup isn't even
+  attempted. The given URL is passed through to the scanner unchanged,
+  reachable the same way it always was: the scanner container falls back
+  to the host network, so a `localhost`/`127.0.0.1` value meaning "the
+  host itself" still resolves correctly.
+- the default URL, but no compose `sonarqube` container at all under this
+  `COMPOSE_FILE` - the common "reached SonarQube some other way" case.
+- the default URL, a caller-overridden compose project name (`-p`/
+  `COMPOSE_PROJECT_NAME`) given only as a one-off flag to the separate
+  `docker compose up` invocation that started the stack, not exported into
+  *this* step's own environment. `docker compose` resolves the project
+  name from its environment (or the compose file's own top-level `name:`)
+  independently each time it runs; without that same `COMPOSE_PROJECT_NAME`
+  present here, this script's own lookup resolves the project name
+  differently from the one the stack actually started under, normally
+  finds no matching container, and falls back - but if some *other*,
+  unrelated container happens to exist under the name this script
+  resolves to, the lookup can instead find it and fail closed (next
+  paragraph), since "found something, but it doesn't check out" and
+  "found nothing at all" aren't told apart by name alone. Export
+  `COMPOSE_PROJECT_NAME` into the step itself (not only the `up` command)
+  to make the lookup follow the override correctly instead.
+
+A *lookup error* - the compose `sonarqube` container IS found but isn't
+running (stopped, restarting), or is attached to other than exactly one
+docker network, or more than one container matches the service - fails
+the job closed instead of falling back, each with its own `fail` reason
+code (`sonarqube-service-not-running`, `sonarqube-network-ambiguous`,
+`sonarqube-service-ambiguous` - see action.yml's `failure-reason` output):
+that is evidence the lookup itself (or the stack) is broken, not evidence
+there simply isn't a compose stack to join.

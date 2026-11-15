@@ -387,6 +387,77 @@ def test_lies_under(sibling, prefix_dir, expected):
     assert _lies_under(sibling, prefix_dir) == expected
 
 
+# A git subcommand that needs remote credentials against origin: `fetch`,
+# `pull`, or `push` - anchored so it doesn't false-positive on a word like
+# "gitfetcher" or match mid-identifier.
+CREDENTIALED_GIT_SUBCOMMAND = re.compile(r"(?<![\w.-])git\s+(fetch|pull|push)\b")
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS)
+def test_every_checkout_disables_persisted_credentials(workflow):
+    """A checked-out repo's embedded git credential helper is only needed by
+    a later git command that talks to a remote (fetch/pull/push) - none of
+    which this job needs (see test_no_git_command_needs_remote_credentials
+    below) - so every checkout should set persist-credentials: false rather
+    than leave a live credential sitting in the checkout's git config for
+    the rest of the job."""
+    checked = 0
+    for job_name, steps in _steps(workflow):
+        for step in steps:
+            if not str(step.get("uses", "")).startswith("actions/checkout@"):
+                continue
+            checked += 1
+            with_block = step.get("with") or {}
+            assert with_block.get("persist-credentials") is False, (
+                f"{workflow}:{job_name}: checkout {step.get('name')!r} does not "
+                "set persist-credentials: false"
+            )
+    assert checked > 0, f"{workflow}: expected at least one checkout step"
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS)
+def test_no_git_command_needs_remote_credentials(workflow):
+    """No `run:` step may need a credentialed git command (fetch/pull/push
+    against origin) - this is what makes persist-credentials: false (above)
+    safe to turn on for every checkout: resolving a base ref's history
+    should rely on actions/checkout's own fetch-depth: 0 (which already
+    populates refs/remotes/origin/* - see actions/checkout src/ref-helper.ts
+    getRefSpecForAllHistory(), invoked whenever fetchDepth <= 0 per
+    src/git-source-provider.ts), then verify locally with `git rev-parse
+    --verify`, rather than fetch again with a live credential."""
+    offenders = []
+    for job_name, steps in _steps(workflow):
+        for step in steps:
+            script = step.get("run")
+            if not script:
+                continue
+            for line in script.splitlines():
+                if line.lstrip().startswith("#"):
+                    continue
+                match = CREDENTIALED_GIT_SUBCOMMAND.search(line)
+                if match:
+                    offenders.append(
+                        f"{job_name} / {step.get('name')}: `git {match.group(1)}` - {line.strip()}"
+                    )
+    assert offenders == [], "git commands needing remote credentials:\n" + "\n".join(offenders)
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [
+        ('git fetch origin "$BASE_REF"', "fetch"),
+        ("git pull", "pull"),
+        ("git push origin HEAD", "push"),
+        ("git merge-base origin/main HEAD", None),
+        ("git diff --name-only HEAD~1", None),
+        ("git rev-parse --verify origin/main", None),
+    ],
+)
+def test_credentialed_git_subcommand_pattern(line, expected):
+    match = CREDENTIALED_GIT_SUBCOMMAND.search(line)
+    assert (match.group(1) if match else None) == expected
+
+
 # --- broader write detection (ported from #54's check_checkout_order.py) -----
 
 
@@ -482,3 +553,53 @@ def test_scanning_src_dot_dot_is_caught():
     value = "src/../${{ inputs.project-base-dir }}"
     prefix_dir = value.split("${{", 1)[0].rstrip("/")
     assert any(_lies_under(sibling, prefix_dir) for sibling in SIBLING_DIRS)
+
+
+# --- compose project name (run_scan.sh's network/URL lookup relies on it) -----
+
+
+def _compose_up_steps(workflow):
+    """Every step whose `run:` starts the ephemeral stack (`docker compose
+    ... up`)."""
+    for job_name, steps in _steps(workflow):
+        for step in steps:
+            script = step.get("run") or ""
+            if re.search(r"\bdocker compose\b.*\bup\b", script):
+                yield job_name, step, steps
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS)
+def test_compose_up_does_not_override_the_project_name(workflow):
+    """run_scan.sh's own scanner-network lookup (see docs/design.md)
+    resolves the compose project name the same way `docker compose`
+    always does by default: from its own environment, or else
+    docker-compose.ephemeral.yml's fixed top-level `name:`. A `-p` flag
+    or COMPOSE_PROJECT_NAME set only for the step that runs `docker
+    compose ... up` (not exported for run_scan.sh's own step too) would
+    silently push the normal "join the compose network" path onto the
+    deprecated host-network fallback instead, with no error - the lookup
+    would simply resolve a different project name and find nothing."""
+    data = yaml.safe_load((WORKFLOWS_DIR / workflow).read_text())
+    workflow_env = data.get("env") or {}
+    assert "COMPOSE_PROJECT_NAME" not in workflow_env, (
+        f"{workflow}: workflow-level env sets COMPOSE_PROJECT_NAME"
+    )
+    checked = 0
+    for job_name, job in data["jobs"].items():
+        job_env = job.get("env") or {}
+        assert "COMPOSE_PROJECT_NAME" not in job_env, (
+            f"{workflow}:{job_name}: job-level env sets COMPOSE_PROJECT_NAME"
+        )
+        for job_name_inner, step, _steps_list in _compose_up_steps(workflow):
+            if job_name_inner != job_name:
+                continue
+            checked += 1
+            script = step["run"]
+            assert not re.search(r"(^|\s)-p(\s|$)", script), (
+                f"{workflow}:{job_name}: {step.get('name')!r} passes -p to `docker compose up`"
+            )
+            step_env = step.get("env") or {}
+            assert "COMPOSE_PROJECT_NAME" not in step_env, (
+                f"{workflow}:{job_name}: {step.get('name')!r} sets COMPOSE_PROJECT_NAME"
+            )
+    assert checked > 0, f"{workflow}: expected a `docker compose ... up` step"

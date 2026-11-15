@@ -116,11 +116,13 @@ fi
 # The scanner image runs as a baked-in non-root user (uid 1000) by default,
 # and its home directory (/opt/sonar-scanner/.sonar, where it caches
 # downloads) is owned by that uid. We override --user to match the host's
-# checkout owner so the bind-mounted PROJECT_BASE_DIR is writable - but that
-# means uid 1000's own home directory usually *isn't* writable by whichever
-# uid we end up running as (e.g. GitHub Actions' non-root `runner` user).
-# Give the scanner a dedicated, host-created (so correctly-owned) cache dir
-# instead of letting it fall back to the image's built-in one.
+# checkout owner so uid 1000's own home directory isn't the only writable
+# path available (e.g. GitHub Actions' non-root `runner` user otherwise
+# couldn't write anywhere). Give the scanner a dedicated, host-created (so
+# correctly-owned) cache dir instead of letting it fall back to the image's
+# built-in one. PROJECT_BASE_DIR itself is bind-mounted read-only in cli
+# mode (see `:ro` in scan_with_cli below) - the scanner only ever reads it
+# there, so its ownership doesn't matter for --user's purposes in that mode.
 #
 # Rooted under RUNNER_TEMP, not bare mktemp -d's default of /tmp: this
 # directory gets bind-mounted into the container below and the scanner
@@ -237,7 +239,10 @@ scan_with_dotnet() {
   # steps or neither. It is masked in the Actions log and never echoed here.
   # sonar.projectBaseDir: pinned to PROJECT_BASE_DIR so .sastrc/.sastignore
   #   paths resolve against the same root as in cli mode, rather than the
-  #   scanner's own guess (since v8: the projects' common root).
+  #   scanner's own guess (since v8: the projects' common root). Dotnet mode
+  #   runs on the runner's own host network, unaffected by cli mode's
+  #   container network handling below - sonar.host.url is passed through
+  #   as-is either way.
   # env -u NUGET_AUTH_TOKEN on begin/end too: neither runs build-command or
   # restores anything, so the credential has no use there - keep it scoped
   # to build-command only, matching the secret's own "build only" promise
@@ -308,34 +313,155 @@ scan_with_cli() {
   fi
   echo "Using scanner image: ${SCANNER_IMAGE}"
 
-  rm -rf "${ABS_PROJECT_BASE_DIR}/.scannerwork"
+  # No `rm -rf .../.scannerwork` here: the scanner can no longer create one
+  # under PROJECT_BASE_DIR at all (the mount below is `:ro`, and
+  # sonar.working.directory is pinned under SCANNER_CACHE_DIR instead), so
+  # there is nothing of this script's own making left to clean up there -
+  # and writing to the project tree, even just to delete a leftover
+  # directory, is exactly what the read-only mount means to avoid.
+
+  # Keep the scanner container off the host network when this script's own
+  # ephemeral stack (docker-compose.ephemeral.yml, via COMPOSE_FILE) can be
+  # found running - joining its compose network instead and reaching
+  # SonarQube by compose service name. `--network host` is kept as an
+  # explicit, deprecated FALLBACK (not an error) for two cases v1 callers
+  # already rely on: a non-default sonar-host-url (pointing at *some*
+  # SonarQube, not necessarily this script's own compose stack), and the
+  # default URL with no compose stack this script itself can find (e.g. a
+  # bare `docker run -p 9000:9000 sonarqube`, see docs/design.md). A real
+  # lookup error once the compose container IS found - present but not
+  # running, or on other than exactly one network - fails closed instead
+  # of silently falling back, since that's evidence something about the
+  # lookup itself is broken, not evidence there's no compose stack at all.
+  #
+  # SONAR_HOST_URL is also used host-side, unchanged, further below (the
+  # compute-engine `curl` poll) - SCANNER_SONAR_HOST_URL is a separate,
+  # in-container-only value that may differ from it.
+  DEFAULT_SONAR_HOST_URL="http://localhost:9000"
+  SCANNER_SONAR_HOST_URL="$SONAR_HOST_URL"
+  SCANNER_NETWORK_ARGS=(--network host)
+  USE_HOST_NETWORK=true
+
+  if [[ "$SONAR_HOST_URL" == "$DEFAULT_SONAR_HOST_URL" ]]; then
+    # `docker compose` prefixes network names with the compose project name
+    # (docker-compose.ephemeral.yml's top-level `name:`, normally fixed -
+    # but a caller could still override it via -p/COMPOSE_PROJECT_NAME).
+    # Rather than assume that prefix, read the network's real name back
+    # from the running `sonarqube` service container itself - this also
+    # means the lookup below only follows a -p/COMPOSE_PROJECT_NAME
+    # override when it's exported into THIS step's own environment, not
+    # only passed to a separate `docker compose up` invocation earlier:
+    # `docker compose` resolves the project name from its own environment
+    # independently each time it runs, so without that same override
+    # present here, this lookup resolves a different project name than
+    # the stack actually started under - normally finding no container at
+    # all (falls back to --network host below, see docs/design.md), but
+    # finding and failing closed on some unrelated container instead if
+    # one happens to exist under the name this lookup resolves to.
+    #
+    # `ps -a -q` (not plain `ps -q`, which silently omits a stopped
+    # container): "no container at all" and "a container that exists but
+    # isn't running" need to be told apart below - the first is this
+    # script's own fallback case, the second is the fail-closed case.
+    #
+    # Captured via `$(...)` with an explicit `||`, not piped straight into
+    # `mapfile < <(...)`: a process substitution's own exit status isn't
+    # checked there, so a failing `docker compose ps` (docker/compose
+    # itself broken) would otherwise look exactly like "ran fine, found
+    # nothing" and silently turn host networking back on instead of
+    # surfacing the broken lookup.
+    sonarqube_ps_output="$(docker compose -f "$COMPOSE_FILE" ps -a -q sonarqube)" \
+      || fail sonarqube-lookup-failed "Could not list the compose 'sonarqube' service container for ${COMPOSE_FILE} (docker compose ps failed; see the error above)."
+    mapfile -t sonarqube_containers <<< "$sonarqube_ps_output"
+    # A real "no matching container" prints nothing at all (zero lines).
+    # A single blank line (one empty-string element) means the same thing
+    # in practice (no container id to act on) - fold it into the same
+    # "not found" case rather than treating it as a found-but-unusable id.
+    if [[ ${#sonarqube_containers[@]} -eq 1 && -z "${sonarqube_containers[0]}" ]]; then
+      sonarqube_containers=()
+    fi
+    case "${#sonarqube_containers[@]}" in
+      0)
+        # No compose container at all for this COMPOSE_FILE: not this
+        # script's own ephemeral stack (never started, or SonarQube
+        # reached some other way under the same default URL) - fall back
+        # to the host network below, same as a non-default sonar-host-url.
+        ;;
+      1)
+        # A failing `docker inspect` here (the container disappeared
+        # between `ps` and here, or docker itself is broken) is folded
+        # into the same reason as "found but not running" - either way,
+        # a failure-reason is always written rather than this script
+        # dying under `set -e` with no reason code at all.
+        sonarqube_status="$(docker inspect -f '{{.State.Status}}' "${sonarqube_containers[0]}")" \
+          || fail sonarqube-service-not-running "Could not inspect the compose 'sonarqube' service container for ${COMPOSE_FILE} (docker inspect failed; see the error above)."
+        if [[ "$sonarqube_status" != "running" ]]; then
+          fail sonarqube-service-not-running "The compose 'sonarqube' service container for ${COMPOSE_FILE} exists but is not running (status: ${sonarqube_status})."
+        fi
+        # Via `{{json ...}} | jq`, not a hand-rolled `{{range}}` template:
+        # `docker inspect -f` appends its own trailing newline after
+        # whatever the template itself prints, so a
+        # `{{println}}`-terminated range emits one trailing blank line *in
+        # addition to* one line per network - silently inflating a
+        # single-network result to two mapfile elements. jq's own
+        # `keys[]` output has no such extra line.
+        mapfile -t sonarqube_networks < <(docker inspect \
+          -f '{{json .NetworkSettings.Networks}}' "${sonarqube_containers[0]}" | jq -r 'keys[]')
+        if [[ ${#sonarqube_networks[@]} -ne 1 ]]; then
+          fail sonarqube-network-ambiguous "Expected the running compose 'sonarqube' service container to be attached to exactly one docker network, found: ${sonarqube_networks[*]:-none}."
+        fi
+        SCANNER_NETWORK_ARGS=(--network "${sonarqube_networks[0]}")
+        USE_HOST_NETWORK=false
+        # "sonarqube" is docker-compose.ephemeral.yml's service name -
+        # always reachable under that name on its own network. 9000 is
+        # that service's own container port, independent of any host-side
+        # port mapping.
+        SCANNER_SONAR_HOST_URL="http://sonarqube:9000"
+        ;;
+      *)
+        fail sonarqube-service-ambiguous "Found ${#sonarqube_containers[@]} containers for the compose 'sonarqube' service for ${COMPOSE_FILE}, expected at most one."
+        ;;
+    esac
+  fi
+
+  if [[ "$USE_HOST_NETWORK" == "true" ]]; then
+    echo "::warning::Running the scanner container on the host network is deprecated and will be removed in a future major version. To avoid this, use this action's own compose stack (docker-compose.ephemeral.yml) and leave sonar-host-url at its default (${DEFAULT_SONAR_HOST_URL}), so the scanner can join its network instead."
+  fi
 
   echo "Scanning ${ABS_PROJECT_BASE_DIR} as project '${PROJECT_KEY}'..."
   if ! docker run --rm \
-    --network host \
+    "${SCANNER_NETWORK_ARGS[@]}" \
     --user "$(id -u):$(id -g)" \
-    -e SONAR_HOST_URL="${SONAR_HOST_URL}" \
+    -e SONAR_HOST_URL="${SCANNER_SONAR_HOST_URL}" \
     -e SONAR_TOKEN="${SONAR_TOKEN}" \
     -e HOME=/tmp \
     -e SONAR_USER_HOME=/tmp/sonar-cache \
-    -v "${ABS_PROJECT_BASE_DIR}:/usr/src" \
+    -v "${ABS_PROJECT_BASE_DIR}:/usr/src:ro" \
     -v "${SCANNER_CACHE_DIR}:/tmp/sonar-cache" \
     -w /usr/src \
     "${SCANNER_IMAGE}" \
     -Dsonar.projectKey="${PROJECT_KEY}" \
     -Dsonar.projectBaseDir=/usr/src \
-    -Dsonar.working.directory=/usr/src/.scannerwork \
+    -Dsonar.working.directory=/tmp/sonar-cache/scannerwork \
     -Dproject.settings="/tmp/sonar-cache/${EMPTY_PROJECT_SETTINGS_NAME}" \
     "${EXTRA_SCANNER_ARGS[@]}" \
     2>&1 | tee "$SCANNER_LOG_FILE"; then
     fail scanner-failed "sonar-scanner-cli failed (see the scanner output above)."
   fi
-  # ^ project.settings: see EMPTY_PROJECT_SETTINGS_NAME above.
-  # sonar.working.directory: the current SonarScanner Engine
-  #   (sonar-scanner-cli 12.x / engine 8.x) defaults this to
-  #   /tmp/.scannerwork inside the container - not a path under
-  #   projectBaseDir - so report-task.txt (read back from the host below)
-  #   would never reach the bind mount without this override.
+  # ^ project mount (:ro): the project is only ever read by the scanner now -
+  #   every path it writes to (sonar.working.directory below, its cache/JRE
+  #   under SONAR_USER_HOME) lives under the separate, writable cache mount
+  #   (SCANNER_CACHE_DIR above) instead, regardless of which network branch
+  #   above was taken.
+  # project.settings: see EMPTY_PROJECT_SETTINGS_NAME above.
+  # sonar.working.directory: moved under /tmp/sonar-cache (the writable
+  #   cache mount) now that /usr/src is read-only. The current SonarScanner
+  #   Engine (sonar-scanner-cli 12.x / engine 8.x) defaults this to
+  #   /tmp/.scannerwork inside the container - not a path under either
+  #   mount - so report-task.txt (read back from the host below, at
+  #   SCANNER_CACHE_DIR/scannerwork/report-task.txt) would never reach a
+  #   host-visible path without this override.
+  # SCANNER_NETWORK_ARGS / SCANNER_SONAR_HOST_URL: see above.
   # EXTRA_SCANNER_ARGS: any -D properties derived from the consumer's
   #   optional .sastrc/.sastignore files (see build_scan_config.py above),
   #   plus -Dsonar.scm.disabled=true when SCM_DISABLED=true - empty when
@@ -355,7 +481,7 @@ if [[ "$SCANNER_MODE" == "dotnet" ]]; then
   report_task_file="${ABS_PROJECT_BASE_DIR}/.sonarqube/out/.sonar/report-task.txt"
 else
   scan_with_cli
-  report_task_file="${ABS_PROJECT_BASE_DIR}/.scannerwork/report-task.txt"
+  report_task_file="${SCANNER_CACHE_DIR}/scannerwork/report-task.txt"
 fi
 
 # Detect languages this scan didn't actually analyze - either because the

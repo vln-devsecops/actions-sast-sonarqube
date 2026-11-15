@@ -41,7 +41,15 @@ import sys
 # run_scan.sh's "No reason written: the check itself crashed" branch), which
 # is evidence the CHECK is broken, not evidence about whether the target
 # branch's code builds. Treating it as a build failure would use an empty
-# baseline to paper over a check bug instead of failing loudly on it.
+# baseline to paper over a check bug instead of failing loudly on it. Also
+# NOT included: sonarqube-lookup-failed, sonarqube-service-not-running,
+# sonarqube-network-ambiguous, sonarqube-service-ambiguous (cli mode's
+# scanner-network lookup against this script's own ephemeral compose
+# stack either failed outright or found something it couldn't make sense
+# of - a stopped/restarting container, one on other than exactly one
+# docker network, or more than one matching container - evidence the
+# lookup or the stack itself is broken, nothing to do with whether the
+# target branch's own code builds).
 BUILD_FAILURE_REASONS = frozenset(
     {
         "build-command-failed",
