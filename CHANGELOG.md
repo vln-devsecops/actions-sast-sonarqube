@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.3.1](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.3.0...v1.3.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **action:** pass the SonarQube token to fetch_findings via the environment ([#66](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/66)) ([db9e9a2](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/db9e9a2783dcd3ce711225e0c8ca84015d300487))
+* **scan:** confine project-base-dir to the caller's checkout ([#67](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/67)) ([e995245](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/e995245159b77e53d058f8c6f5e7b29ace8f20bb))
+* **scan:** locate the .NET runtime for the scanner when DOTNET_ROOT is unset ([#65](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/65)) ([3447616](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/3447616491a2da4be617168ae470653e5ec943e4))
+
 ## [1.3.0](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.2.2...v1.3.0) (2026-11-15)
 
 
