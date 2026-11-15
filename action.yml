@@ -112,6 +112,12 @@ inputs:
     description: >-
       .NET SDK version(s) for actions/setup-dotnet, which runs only with
       scanner-mode "dotnet". Must be able to build the project.
+      actions/setup-dotnet sets DOTNET_ROOT, which the scanner's apphost
+      needs to find the runtime; scripts/run_scan.sh, when invoked
+      directly (see docs/test-procedure.md) rather than through this
+      action, derives DOTNET_ROOT itself from the `dotnet` on PATH if
+      neither it nor the matching DOTNET_ROOT_<ARCH> is already set - see
+      the README's "Scope and limits" for scanner-mode: dotnet.
     required: false
     default: "10.0.x"
   import-roslyn-issues:

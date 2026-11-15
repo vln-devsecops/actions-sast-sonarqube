@@ -208,6 +208,57 @@ scan_with_dotnet() {
   if [[ -z "$version" ]]; then
     fail scanner-install-failed "Could not resolve the dotnet-sonarscanner version from ${manifest}."
   fi
+
+  # `dotnet-sonarscanner` (and the scanner's own JRE-launching apphost)
+  # needs the .NET runtime to be findable. Per
+  # https://learn.microsoft.com/dotnet/core/tools/dotnet-environment-variables#dotnet_root-dotnet_rootx86-dotnet_root_x86-dotnet_root_x64
+  # an apphost looks for it in this order: DOTNET_ROOT_<ARCH> (e.g.
+  # DOTNET_ROOT_X64 on an x64 process), DOTNET_ROOT(x86) (32-bit process on
+  # 64-bit Windows only - not applicable on the Linux runners this action
+  # targets), then DOTNET_ROOT, then the registered install location, then
+  # the OS default (e.g. /usr/share/dotnet on Linux). actions/setup-dotnet
+  # sets DOTNET_ROOT, so GitHub-hosted runners (and any self-hosted runner
+  # that also sets it) are already covered. A self-hosted runner whose .NET
+  # SDK lives somewhere non-standard (e.g. a user-local $HOME/.dotnet-csharp)
+  # with neither set has nothing pointing at it, and `begin` fails with
+  # "You must install .NET to run this application." even though `dotnet`
+  # itself is right there on PATH.
+  #
+  # Only derive it when BOTH the architecture-specific variable and
+  # DOTNET_ROOT itself are unset - a caller-provided value of either is
+  # never overridden. When derived, it's passed as an explicit `env`
+  # assignment to each of this function's own dotnet/scanner invocations
+  # below (install, begin, build, end), not exported into this whole
+  # script's environment, so it can't leak into anything else this script
+  # runs (the cli-mode scanner container, the compute-engine poll, ...).
+  local dotnet_root_arch_var=""
+  case "$(uname -m)" in
+    x86_64) dotnet_root_arch_var="DOTNET_ROOT_X64" ;;
+    aarch64|arm64) dotnet_root_arch_var="DOTNET_ROOT_ARM64" ;;
+    armv7l|armv6l) dotnet_root_arch_var="DOTNET_ROOT_ARM" ;;
+    i386|i686) dotnet_root_arch_var="DOTNET_ROOT_X86" ;;
+  esac
+  local dotnet_root_already_set=false
+  if [[ -n "${DOTNET_ROOT:-}" ]]; then
+    dotnet_root_already_set=true
+  elif [[ -n "$dotnet_root_arch_var" && -n "${!dotnet_root_arch_var:-}" ]]; then
+    dotnet_root_already_set=true
+  fi
+  local DOTNET_ROOT_ENV_ARGS=()
+  if [[ "$dotnet_root_already_set" == false ]]; then
+    local dotnet_cmd
+    dotnet_cmd="$(command -v dotnet || true)"
+    if [[ -n "$dotnet_cmd" ]]; then
+      # readlink -f: resolve through a symlinked `dotnet` (e.g. from
+      # update-alternatives or a version manager) to its physical install
+      # directory, not the symlink's own directory.
+      DOTNET_ROOT_ENV_ARGS=(DOTNET_ROOT="$(dirname "$(readlink -f "$dotnet_cmd")")")
+    fi
+    # else: dotnet isn't on PATH at all - leave DOTNET_ROOT_ENV_ARGS empty
+    # and fall through unchanged; the `dotnet tool install` below fails the
+    # same way it always did (scanner-install-failed).
+  fi
+
   DOTNET_TOOL_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/dotnet-sonarscanner.XXXXXX")"
   BUILD_LOG_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/dotnet-build-log.XXXXXX")"
   echo "Installing dotnet-sonarscanner ${version}..."
@@ -215,7 +266,7 @@ scan_with_dotnet() {
   # code under scan - scope the credential to build-command only (its
   # description promises "build only"), the same direction SONAR_TOKEN is
   # already scoped away from build-command below.
-  if ! env -u NUGET_AUTH_TOKEN dotnet tool install dotnet-sonarscanner --version "$version" --tool-path "$DOTNET_TOOL_DIR"; then
+  if ! env -u NUGET_AUTH_TOKEN "${DOTNET_ROOT_ENV_ARGS[@]}" dotnet tool install dotnet-sonarscanner --version "$version" --tool-path "$DOTNET_TOOL_DIR"; then
     fail scanner-install-failed "Could not install dotnet-sonarscanner ${version} (is the .NET SDK set up?)."
   fi
   local scanner="${DOTNET_TOOL_DIR}/dotnet-sonarscanner"
@@ -247,7 +298,7 @@ scan_with_dotnet() {
   # restores anything, so the credential has no use there - keep it scoped
   # to build-command only, matching the secret's own "build only" promise
   # (action.yml's nuget-auth-token input description).
-  if ! (cd "$ABS_PROJECT_BASE_DIR" && env -u NUGET_AUTH_TOKEN "$scanner" begin \
+  if ! (cd "$ABS_PROJECT_BASE_DIR" && env -u NUGET_AUTH_TOKEN "${DOTNET_ROOT_ENV_ARGS[@]}" "$scanner" begin \
     "/k:${PROJECT_KEY}" \
     "/d:sonar.host.url=${SONAR_HOST_URL}" \
     "/d:sonar.token=${SONAR_TOKEN}" \
@@ -266,12 +317,12 @@ scan_with_dotnet() {
   # line - see the README's trust note.
   echo "Running build-command..."
   local build_status=0
-  (cd "$ABS_PROJECT_BASE_DIR" && env -u SONAR_TOKEN bash -c "$BUILD_COMMAND") 2>&1 | tee "$BUILD_LOG_FILE" || build_status=$?
+  (cd "$ABS_PROJECT_BASE_DIR" && env -u SONAR_TOKEN "${DOTNET_ROOT_ENV_ARGS[@]}" bash -c "$BUILD_COMMAND") 2>&1 | tee "$BUILD_LOG_FILE" || build_status=$?
   if (( build_status != 0 )); then
     fail build-command-failed "build-command exited with status ${build_status}; not running dotnet-sonarscanner end."
   fi
 
-  if ! (cd "$ABS_PROJECT_BASE_DIR" && env -u NUGET_AUTH_TOKEN "$scanner" end "/d:sonar.token=${SONAR_TOKEN}") 2>&1 | tee "$SCANNER_LOG_FILE"; then
+  if ! (cd "$ABS_PROJECT_BASE_DIR" && env -u NUGET_AUTH_TOKEN "${DOTNET_ROOT_ENV_ARGS[@]}" "$scanner" end "/d:sonar.token=${SONAR_TOKEN}") 2>&1 | tee "$SCANNER_LOG_FILE"; then
     if grep -q "No analyzable projects were found" "$SCANNER_LOG_FILE"; then
       fail no-analyzable-projects "dotnet-sonarscanner end failed: the build compiled no C# project it could analyze."
     fi
