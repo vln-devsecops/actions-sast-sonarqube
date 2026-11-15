@@ -50,7 +50,7 @@ SONAR_HOST_URL=http://localhost:9000 SONAR_TOKEN="$token" \
   PROJECT_KEY=test-baseline PROJECT_BASE_DIR=fixtures \
   COMPOSE_FILE=docker-compose.ephemeral.yml \
   ./scripts/run_scan.sh
-python3 scripts/fetch_findings.py --host http://localhost:9000 --token "$token" \
+SONAR_TOKEN="$token" python3 scripts/fetch_findings.py --host http://localhost:9000 \
   --project-key test-baseline --out /tmp/baseline-findings.json
 
 # "head" scan - copy fixtures/, tweak it, scan under a different project key
@@ -60,7 +60,7 @@ SONAR_HOST_URL=http://localhost:9000 SONAR_TOKEN="$token" \
   PROJECT_KEY=test-head PROJECT_BASE_DIR=/tmp/fixtures-head \
   COMPOSE_FILE=docker-compose.ephemeral.yml \
   ./scripts/run_scan.sh
-python3 scripts/fetch_findings.py --host http://localhost:9000 --token "$token" \
+SONAR_TOKEN="$token" python3 scripts/fetch_findings.py --host http://localhost:9000 \
   --project-key test-head --out /tmp/head-findings.json
 
 python3 scripts/diff_findings.py --baseline /tmp/baseline-findings.json \
@@ -265,7 +265,7 @@ SONAR_HOST_URL=http://localhost:9000 SONAR_TOKEN="$token" \
   RUNNER_TEMP=~/scratch/runner-temp \
   SCANNER_MODE=dotnet BUILD_COMMAND="dotnet build Tiny.slnx" \
   ./scripts/run_scan.sh
-python3 scripts/fetch_findings.py --host http://localhost:9000 --token "$token" \
+SONAR_TOKEN="$token" python3 scripts/fetch_findings.py --host http://localhost:9000 \
   --project-key dotnet-tiny --out ~/scratch/dotnet-tiny.json
 jq -r '.[].rule' ~/scratch/dotnet-tiny.json
 ```

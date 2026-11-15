@@ -201,7 +201,9 @@ runs:
 
     - name: Install Python dependencies
       shell: bash
-      run: pip install -r "${{ github.action_path }}/requirements.txt"
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: pip install -r "$ACTION_PATH/requirements.txt"
 
     - name: Set up .NET SDK
       # Explicit comparison, never a bare truthy `if: ${{ inputs.x }}`: any
@@ -215,6 +217,7 @@ runs:
       id: scan
       shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
         SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
         SONAR_TOKEN: ${{ inputs.sonar-token }}
         PROJECT_KEY: ${{ inputs.project-key }}
@@ -234,20 +237,26 @@ runs:
         # neither needs it, and never passed to the fetch/report steps
         # below, which have their own `env:` and don't inherit this one's.
         NUGET_AUTH_TOKEN: ${{ inputs.nuget-auth-token }}
-      run: "${{ github.action_path }}/scripts/run_scan.sh"
+      run: "$ACTION_PATH/scripts/run_scan.sh"
 
     - name: Fetch and normalize findings
       id: fetch
       shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        SONAR_HOST_URL: ${{ inputs.sonar-host-url }}
+        # Read by fetch_findings.py itself (resolve_token) - never passed as
+        # a --token argument, which would put it on this process's argv.
+        SONAR_TOKEN: ${{ inputs.sonar-token }}
+        PROJECT_KEY: ${{ inputs.project-key }}
       run: |
         set -euo pipefail
         out_dir="${RUNNER_TEMP:-/tmp}/sonar-findings"
         mkdir -p "$out_dir"
-        out_file="$out_dir/${{ inputs.project-key }}.json"
-        python3 "${{ github.action_path }}/scripts/fetch_findings.py" \
-          --host "${{ inputs.sonar-host-url }}" \
-          --token "${{ inputs.sonar-token }}" \
-          --project-key "${{ inputs.project-key }}" \
+        out_file="$out_dir/${PROJECT_KEY}.json"
+        python3 "$ACTION_PATH/scripts/fetch_findings.py" \
+          --host "$SONAR_HOST_URL" \
+          --project-key "$PROJECT_KEY" \
           --out "$out_file"
         echo "findings-json=$out_file" >> "$GITHUB_OUTPUT"
 
@@ -255,15 +264,18 @@ runs:
       id: report
       shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
+        PROJECT_KEY: ${{ inputs.project-key }}
+        FINDINGS_JSON: ${{ steps.fetch.outputs.findings-json }}
         UNANALYZED_LANGUAGES: ${{ steps.scan.outputs.unanalyzed-languages }}
       run: |
         set -euo pipefail
         out_dir="${RUNNER_TEMP:-/tmp}/sonar-findings"
         mkdir -p "$out_dir"
-        report_file="$out_dir/${{ inputs.project-key }}-report.md"
-        python3 "${{ github.action_path }}/scripts/render_findings_report.py" \
-          --findings "${{ steps.fetch.outputs.findings-json }}" \
-          --project-key "${{ inputs.project-key }}" \
+        report_file="$out_dir/${PROJECT_KEY}-report.md"
+        python3 "$ACTION_PATH/scripts/render_findings_report.py" \
+          --findings "$FINDINGS_JSON" \
+          --project-key "$PROJECT_KEY" \
           --unanalyzed-languages "$UNANALYZED_LANGUAGES" \
           --out "$report_file"
         echo "findings-report=$report_file" >> "$GITHUB_OUTPUT"
