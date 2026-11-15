@@ -3,9 +3,11 @@ import pytest
 from fetch_findings import (
     UNKNOWN_SEVERITY_FALLBACK,
     _dedupe,
+    build_parser,
     normalize,
     normalize_hotspot,
     plan_partitions,
+    resolve_token,
 )
 
 
@@ -156,3 +158,41 @@ def test_dedupe_keeps_distinct_findings():
     a = {"rule": "r1", "path": "a.py", "hash": "abc", "line": 1}
     b = {"rule": "r2", "path": "a.py", "hash": "def", "line": 2}
     assert _dedupe([a, b]) == [a, b]
+
+
+# --- token comes from the environment, never the command line ---------------
+
+
+def test_resolve_token_reads_from_env():
+    assert resolve_token({"SONAR_TOKEN": "abc123"}) == "abc123"
+
+
+def test_resolve_token_missing_errors_clearly():
+    with pytest.raises(SystemExit, match="SONAR_TOKEN"):
+        resolve_token({})
+
+
+def test_resolve_token_empty_string_errors_clearly():
+    """An empty SONAR_TOKEN is as unusable as a missing one - and must not
+    silently become `Basic Og==` (base64 of a bare colon) against the
+    SonarQube API."""
+    with pytest.raises(SystemExit, match="SONAR_TOKEN"):
+        resolve_token({"SONAR_TOKEN": ""})
+
+
+def test_build_parser_has_no_token_flag():
+    """--token used to put the SonarQube token on this process's argv,
+    visible to any other process on the host via /proc/*/cmdline. It must
+    never come back - the token is read from the SONAR_TOKEN environment
+    variable instead (see resolve_token)."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["--host", "h", "--token", "secret", "--project-key", "k", "--out", "o"]
+        )
+
+
+def test_build_parser_accepts_required_args_without_a_token():
+    args = build_parser().parse_args(["--host", "h", "--project-key", "k", "--out", "o"])
+    assert args.host == "h"
+    assert args.project_key == "k"
+    assert args.out == "o"
