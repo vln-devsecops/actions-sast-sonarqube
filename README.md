@@ -269,6 +269,20 @@ Scope and limits:
   Dependabot bumps it. It is installed into `RUNNER_TEMP`, and its JRE is
   cached there too (`/d:sonar.userHome`), which keeps it working on a
   self-hosted runner whose `/tmp` is `noexec`.
+- `dotnet-sonarscanner` needs the .NET runtime to be findable by its own
+  apphost, which (per
+  [Microsoft's docs](https://learn.microsoft.com/dotnet/core/tools/dotnet-environment-variables#dotnet_root-dotnet_rootx86-dotnet_root_x86-dotnet_root_x64))
+  checks `DOTNET_ROOT_<ARCH>` (e.g. `DOTNET_ROOT_X64`), then `DOTNET_ROOT`,
+  then the registered install location, then the OS default. On
+  GitHub-hosted runners `actions/setup-dotnet` sets `DOTNET_ROOT`, so this
+  is already covered. On a self-hosted runner whose .NET SDK lives
+  somewhere non-standard (for example a user-local `$HOME/.dotnet-csharp`)
+  with neither variable set, `run_scan.sh` derives `DOTNET_ROOT` itself
+  from the `dotnet` found on `PATH` (resolved through any symlink to its
+  physical install directory) and passes it only to the scanner install,
+  `begin`, `end` and the build - it never overrides a value either
+  variable already has, and if `dotnet` isn't on `PATH` at all this has no
+  effect (the tool install still fails the same way it always did).
 - The Sonar token is passed as `/d:sonar.token=...` on the `begin` and
   `end` command lines, because the scanner ignores the `SONAR_TOKEN`
   environment variable. GitHub Actions masks it in the log, and the script
