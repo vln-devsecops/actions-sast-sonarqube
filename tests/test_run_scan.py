@@ -689,12 +689,27 @@ def test_dotnet_still_reports_extension_detected_languages(harness):
 # then DOTNET_ROOT, then the registered install location, then the OS
 # default (e.g. /usr/share/dotnet on Linux) - so without one of the first
 # three set, a non-default install location is never found.
+#
+# A resolved `dotnet` directory is only trusted as a real install root when
+# it contains host/fxr (the hostfxr shared library's own directory, present
+# in every real .NET install, used here only as a marker of "this looks
+# like a .NET root" - run_scan.sh never loads it itself). Without that
+# check, a launcher shim - e.g. Snap's /snap/bin/dotnet, a symlink to
+# /usr/bin/snap - would resolve to a directory that is NOT a .NET root
+# (/usr/bin), and deriving DOTNET_ROOT=/usr/bin would override a setup
+# that works today via the registered install location or the OS default,
+# breaking it instead of leaving it alone.
+
+
+def _make_dotnet_root(path):
+    (path / "host" / "fxr").mkdir(parents=True)
 
 
 def test_dotnet_root_derived_from_dotnet_on_path(harness):
+    bin_dir = Path(harness.env["PATH"].split(os.pathsep, 1)[0])
+    _make_dotnet_root(bin_dir)
     result = _dotnet(harness, BUILD_COMMAND=f"env > {harness.log_dir}/build.env")
     assert result.returncode == 0, result.stderr
-    bin_dir = harness.env["PATH"].split(os.pathsep, 1)[0]
     for name in ("dotnet-tool.env", "scanner-begin.env", "scanner-end.env"):
         env_text = (harness.log_dir / name).read_text()
         assert f"DOTNET_ROOT={bin_dir}" in env_text, f"{name} missing derived DOTNET_ROOT ({env_text})"
@@ -712,6 +727,7 @@ def test_dotnet_root_derived_through_a_symlinked_dotnet(harness):
     real_dir.mkdir()
     real_dotnet = real_dir / "dotnet"
     _write_exe(real_dotnet, FAKE_DOTNET)
+    _make_dotnet_root(real_dir)
     (bin_dir / "dotnet").unlink()
     (bin_dir / "dotnet").symlink_to(real_dotnet)
 
@@ -721,6 +737,32 @@ def test_dotnet_root_derived_through_a_symlinked_dotnet(harness):
     assert f"DOTNET_ROOT={real_dir}" in begin_env
     end_env = (harness.log_dir / "scanner-end.env").read_text()
     assert f"DOTNET_ROOT={real_dir}" in end_env
+
+
+def test_dotnet_root_not_derived_without_host_fxr(harness):
+    # Mirrors a launcher shim (e.g. Snap's /snap/bin/dotnet -> .../usr/bin/
+    # snap): readlink -f resolves to a real directory, but it is not a
+    # .NET install root. Deriving DOTNET_ROOT from it anyway would point
+    # the scanner and build-command at nonsense, breaking a setup that
+    # works today through the registered install location or the OS
+    # default - this must leave DOTNET_ROOT unset instead (today's
+    # behaviour), and that must not leak into build-command either.
+    bin_dir = Path(harness.env["PATH"].split(os.pathsep, 1)[0])
+    shim_dir = harness.tmp_path / "snap-launcher"
+    shim_dir.mkdir()
+    shim_dotnet = shim_dir / "dotnet"
+    _write_exe(shim_dotnet, FAKE_DOTNET)
+    # Deliberately no host/fxr under shim_dir.
+    (bin_dir / "dotnet").unlink()
+    (bin_dir / "dotnet").symlink_to(shim_dotnet)
+
+    result = _dotnet(harness, BUILD_COMMAND=f"env > {harness.log_dir}/build.env")
+    assert result.returncode == 0, result.stderr
+    for name in ("dotnet-tool.env", "scanner-begin.env", "scanner-end.env"):
+        env_text = (harness.log_dir / name).read_text()
+        assert "DOTNET_ROOT=" not in env_text, f"{name} got a derived DOTNET_ROOT from a non-root dir: {env_text}"
+    build_env = (harness.log_dir / "build.env").read_text()
+    assert "DOTNET_ROOT=" not in build_env
 
 
 def test_dotnet_root_caller_value_is_kept(harness):
