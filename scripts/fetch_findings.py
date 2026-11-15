@@ -26,6 +26,7 @@ know hotspots exist as a separate concept.
 import argparse
 import base64
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -266,15 +267,41 @@ def fetch_all(host, token, project_key):  # pragma: no cover - network I/O, vali
     )
 
 
-def main():  # pragma: no cover - CLI glue over the above, validated live
+def build_parser():
+    """Separated from main() so tests can assert on the parser's shape
+    (e.g. that no --token flag exists) without invoking main() itself."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", required=True, help="SonarQube base URL")
-    parser.add_argument("--token", required=True, help="SonarQube user token")
     parser.add_argument("--project-key", required=True)
     parser.add_argument("--out", required=True, help="Path to write normalized findings JSON to")
-    args = parser.parse_args()
+    return parser
 
-    findings = fetch_all(args.host, args.token, args.project_key)
+
+def resolve_token(env=None):
+    """Read the SonarQube token from the SONAR_TOKEN environment variable.
+
+    Never accept it as a command-line argument: a process's argv is visible
+    to any other process on the same host (e.g. via /proc/*/cmdline),
+    unlike an environment variable scoped to this step. Fails loudly - a
+    missing or empty token must never be silently sent as an empty
+    credential (SonarQube would see `Basic Og==`, the base64 of a bare
+    colon, rather than a clear error here)."""
+    env = os.environ if env is None else env
+    token = env.get("SONAR_TOKEN")
+    if not token:
+        raise SystemExit(
+            "SONAR_TOKEN environment variable is required (the SonarQube "
+            "user token to authenticate with) - it is no longer accepted "
+            "as a --token command-line argument."
+        )
+    return token
+
+
+def main():  # pragma: no cover - CLI glue over the above, validated live
+    args = build_parser().parse_args()
+    token = resolve_token()
+
+    findings = fetch_all(args.host, token, args.project_key)
 
     with open(args.out, "w") as f:
         json.dump(findings, f, indent=2, sort_keys=True)
