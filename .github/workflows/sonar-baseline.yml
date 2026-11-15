@@ -207,6 +207,7 @@ jobs:
           # above), so prefix it here rather than changing what the input
           # means to callers.
           project-base-dir: src/${{ inputs.project-base-dir }}
+          checkout-root: src
           sast-config-path: ${{ inputs.sast-config-path }}
           sast-ignore-path: ${{ inputs.sast-ignore-path }}
           fail-on-unanalyzed-languages: ${{ inputs.fail-on-unanalyzed-languages }}

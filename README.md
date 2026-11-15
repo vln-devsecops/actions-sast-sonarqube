@@ -334,6 +334,17 @@ untrusted author within one job:
   `cp`/`mv`, `-o` and output flags in `run:` blocks (following local
   variables) that bypass `$RUNNER_TEMP`; other write forms need manual
   review.
+- Because those sibling directories live under the same `GITHUB_WORKSPACE`
+  as `src`, a symbolic link inside the caller's checkout that resolves to
+  another directory in the same workspace (this action's source or the
+  baseline checkout) would pass a workspace-wide check. Both workflows
+  pass the action's `checkout-root` input on every scan they run (`src`
+  for the PR head and baseline scans, `.baseline-checkout` for the
+  fallback baseline scan), so `run_scan.sh` also confines
+  `project-base-dir` to that checkout - narrower than, and in addition to,
+  the workspace check above, not instead of it. A direct action user who
+  doesn't set `checkout-root` keeps today's `GITHUB_WORKSPACE`-wide
+  confinement, unchanged - see `docs/design.md`.
 
 #### Fork PRs in `scanner-mode: dotnet`
 

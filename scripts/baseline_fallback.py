@@ -32,7 +32,8 @@ import sys
 # no-report-task, ce-task-failed, ce-task-timeout, invalid-sast-config,
 # build-command-required, build-command-not-allowed, invalid-scanner-mode,
 # project-base-dir-missing, workspace-inaccessible,
-# project-base-dir-outside-workspace (configuration or layout errors, not
+# project-base-dir-outside-workspace, checkout-root-inaccessible,
+# project-base-dir-outside-checkout (configuration or layout errors, not
 # the target branch's build), invalid-sast-config (also set when a config
 # file is rejected on detection's re-read after the build - a rejected
 # config is never "the base doesn't build"), scanner-failed (cli mode has

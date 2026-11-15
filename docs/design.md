@@ -119,3 +119,44 @@ code (`sonarqube-service-not-running`, `sonarqube-network-ambiguous`,
 `sonarqube-service-ambiguous` - see action.yml's `failure-reason` output):
 that is evidence the lookup itself (or the stack) is broken, not evidence
 there simply isn't a compose stack to join.
+
+## Confining `project-base-dir`: workspace vs. checkout root
+
+`run_scan.sh` resolves `PROJECT_BASE_DIR` to its physical path (`pwd -P`)
+and refuses to proceed if that path lies outside a confinement root - so a
+checked-out symlink is mounted (and scanned) as the real directory it
+points at, never silently followed past a boundary this action means to
+enforce.
+
+Before `CHECKOUT_ROOT` existed, `GITHUB_WORKSPACE` was the only root. That
+is still correct for a direct action user with one checkout: nothing else
+lives in the workspace for a symlink to reach. It stopped being enough for
+`sonar-pr.yml`/`sonar-baseline.yml`, though: both check the caller's own
+code out into `./src`, with this action's own source (`.sast-sonarqube`)
+and the fallback baseline checkout (`.baseline-checkout`) as sibling
+directories under the same `GITHUB_WORKSPACE`. A symbolic link inside the
+caller's checkout that resolves to another directory in the same
+workspace (this action's source or the baseline checkout) would pass a
+workspace-wide check, because the resolved target is still inside the
+workspace - the check can't tell that apart from a legitimate path, and
+would scan a directory other than the caller's checkout.
+
+`CHECKOUT_ROOT`, when set, adds a second, narrower boundary - `src` for
+the PR head and baseline scans, `.baseline-checkout` for the fallback
+baseline scan - resolved physically the same way as `PROJECT_BASE_DIR`
+itself. It narrows the confinement in *addition* to the `GITHUB_WORKSPACE`
+check above, never in place of it: `PROJECT_BASE_DIR` has to satisfy both
+checks that are set, so a `CHECKOUT_ROOT` that itself resolves outside
+`GITHUB_WORKSPACE` (a symlink, or a relative value like `..`) doesn't let
+anything outside the workspace through either.
+`tests/test_workflow_hardening.py` pins, for every step that invokes the
+scanner, that its `checkout-root` matches the literal checkout prefix in
+its own `project-base-dir`, is the `path:` of an actual `actions/checkout`
+step in the same job, and is never `.sast-sonarqube` (which, being this
+action's own trusted source, is itself a real checkout `path:` in both
+workflows - the "is a real checkout path" condition alone wouldn't catch
+a mistake that points a scan step at it). Left unset - every direct
+action user by default - only the `GITHUB_WORKSPACE` check applies,
+unchanged from before this input existed. Outside Actions, with neither
+set, there is no root to confine to and the check is skipped entirely,
+same as always.

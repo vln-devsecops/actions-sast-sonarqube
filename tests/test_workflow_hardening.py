@@ -303,6 +303,81 @@ def test_sibling_dirs_not_under_scanned_project_base_dir(workflow):
     assert checked > 0, f"{workflow}: expected at least one step invoking the scanner"
 
 
+def _checkout_root_violations(workflow, job_name, steps):
+    """Violations of the checkout-root contract for every scan step in
+    this job: `checkout-root` must (a) equal the literal sibling directory
+    its own `project-base-dir` is rooted under, (b) be the `path:` of an
+    actual `actions/checkout` step earlier in the same job - not just a
+    string that happens to match - and (c) never be `.sast-sonarqube`,
+    the one checkout no scan step may ever be confined to (it is this
+    action's own trusted source, not the caller's code or a baseline to
+    compare against - see test_nothing_after_the_action_source_checkout_modifies_it).
+    (c) matters on its own: `.sast-sonarqube` IS a real checkout `path:` in
+    both workflows (this action's own source), so (b) alone would not
+    catch a mutation that points a scan step at it."""
+    violations = []
+    checkout_paths = {
+        (s.get("with") or {}).get("path") for s in _checkout_steps(steps) if (s.get("with") or {}).get("path")
+    }
+    for step in steps:
+        if str(step.get("uses", "")) != SCANNER_ACTION_USES:
+            continue
+        with_block = step.get("with") or {}
+        value = str(with_block.get("project-base-dir", ""))
+        prefix_dir = value.split("${{", 1)[0].rstrip("/")
+        checkout_root = with_block.get("checkout-root")
+        label = f"{workflow}:{job_name}:{step.get('name')}"
+        if not prefix_dir:
+            violations.append(f"{label}: project-base-dir {value!r} has no literal checkout-root prefix")
+            continue
+        if checkout_root != prefix_dir:
+            violations.append(
+                f"{label}: checkout-root {checkout_root!r} does not match "
+                f"project-base-dir's checkout prefix {prefix_dir!r}"
+            )
+        if checkout_root not in checkout_paths:
+            violations.append(
+                f"{label}: checkout-root {checkout_root!r} is not the `path:` of any "
+                f"actions/checkout step in this job (found: {sorted(p for p in checkout_paths if p)})"
+            )
+        if checkout_root == ".sast-sonarqube":
+            violations.append(f"{label}: checkout-root must never be .sast-sonarqube")
+    return violations
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS)
+def test_every_scan_step_passes_a_checkout_root_matching_its_checkout_path(workflow):
+    """run_scan.sh confines `project-base-dir` to `checkout-root` (when
+    set) instead of the whole workspace - a symlink committed into one
+    sibling checkout (e.g. `src`) can otherwise resolve into another (this
+    action's own source, or the fallback baseline checkout) and still pass
+    a bare workspace check. See `_checkout_root_violations` for exactly
+    what's required of every step that invokes the scanner."""
+    checked = 0
+    violations = []
+    for job_name, steps in _steps(workflow):
+        checked += sum(1 for s in steps if str(s.get("uses", "")) == SCANNER_ACTION_USES)
+        violations.extend(_checkout_root_violations(workflow, job_name, steps))
+    assert checked > 0, f"{workflow}: expected at least one step invoking the scanner"
+    assert violations == [], "checkout-root wiring violations:\n" + "\n".join(violations)
+
+
+def test_checkout_root_violations_catch_the_dot_sast_sonarqube_mutation():
+    """Regression: a mutation that points a scan step's checkout-root (and
+    project-base-dir's literal prefix) at `.sast-sonarqube` must be caught
+    even though `.sast-sonarqube` is a real checkout `path:` in this job -
+    see `_checkout_root_violations`'s (c)."""
+    steps = list(_pr_steps())
+    index = _index_of(steps, "Scan PR head")
+    mutated = dict(steps[index])
+    mutated["with"] = dict(mutated["with"])
+    mutated["with"]["checkout-root"] = ".sast-sonarqube"
+    mutated["with"]["project-base-dir"] = ".sast-sonarqube/${{ inputs.project-base-dir }}"
+    steps[index] = mutated
+    violations = _checkout_root_violations("sonar-pr.yml", "pr-scan", steps)
+    assert any(".sast-sonarqube" in v for v in violations), violations
+
+
 @pytest.mark.parametrize("workflow", WORKFLOWS)
 def test_checkouts_into_fixed_path_are_preceded_by_removal(workflow):
     checked = 0
