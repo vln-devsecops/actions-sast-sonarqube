@@ -11,14 +11,16 @@ inputs:
   sonar-host-url:
     description: >-
       Base URL of the running SonarQube instance, used host-side (polling
-      the compute-engine task, fetching findings). The scanner itself never
-      runs on the host network (see docs/design.md's "Scanner container
-      isolation" section) - left at the default, it instead reaches
-      SonarQube by compose service name on the ephemeral stack's own
-      docker network; changed to anything else, it is passed through to
-      the scanner container unchanged, so it must be reachable from a
-      container on docker's default bridge network (a routable
-      hostname/IP, not "localhost" meaning the host itself).
+      the compute-engine task, fetching findings). Left at the default
+      with this action's own ephemeral compose stack up and the
+      "sonarqube" service container found and running, the scanner
+      container joins that stack's own docker network instead and
+      reaches SonarQube by compose service name (see docs/design.md).
+      Otherwise - a non-default value, or the default with no such
+      container found - the scanner container runs on the host network
+      instead (deprecated, with a warning; will be removed in a future
+      major version), so a "localhost"/"127.0.0.1" value still resolves
+      to the host and keeps working.
     required: false
     default: http://localhost:9000
   sonar-token:
@@ -173,13 +175,15 @@ outputs:
       scanner-install-failed, begin-failed, build-command-failed,
       end-failed, no-analyzable-projects, check-failed, project-not-built,
       project-not-analyzed. cli mode: scanner-failed,
-      sonarqube-service-not-running (the compose "sonarqube" service
-      container exists but isn't running - the default sonar-host-url's
-      network lookup found it ambiguous rather than simply absent),
+      sonarqube-lookup-failed (the "docker compose ps" lookup for the
+      compose "sonarqube" service container itself failed - a broken
+      docker/compose, not evidence either way about whether a container
+      exists), sonarqube-service-not-running (the container was found but
+      isn't running, or "docker inspect" on it failed),
       sonarqube-network-ambiguous (that container is attached to other
       than exactly one docker network), sonarqube-service-ambiguous (more
       than one container matched the compose "sonarqube" service). None of
-      these three fire when no compose container is found at all, or when
+      these fire when no compose container is found at all, or when
       sonar-host-url isn't the default - the scanner falls back to the
       host network instead (a deprecation warning, not a failure); see
       docs/design.md. Either mode: no-report-task, ce-task-failed,

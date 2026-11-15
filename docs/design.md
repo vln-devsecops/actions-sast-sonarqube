@@ -55,7 +55,7 @@ small YAML schema translated onto the underlying `sonar.*` properties) vs.
 file, so a consumer who only wants "exclude these paths" doesn't need to
 learn YAML or SonarQube's own property names at all.
 
-## Scanner container isolation (read-only project mount, no host network)
+## Scanner container isolation (read-only project mount; compose network when available)
 
 `scripts/run_scan.sh` bind-mounts `PROJECT_BASE_DIR` into the scanner
 container read-only (`:ro`). The scanner's own writes (its working
@@ -66,13 +66,11 @@ and `report-task.txt` is read back from there on the host side
 (`SCANNER_CACHE_DIR/scannerwork/report-task.txt`), not from the project
 directory.
 
-The scanner container joins the host network (`--network host`) by
-default - unchanged from before this isolation work - but that is now a
-deliberate, **deprecated** fallback, not the only path: when `SONAR_HOST_URL`
-is still this action's own default (`http://localhost:9000`) *and* a
-compose `sonarqube` service container can be found, running, attached to
-exactly one docker network, the scanner joins that network instead and
-reaches SonarQube by its compose service name (`http://sonarqube:9000`) -
+By default - when `SONAR_HOST_URL` is still this action's own default
+(`http://localhost:9000`) *and* a compose `sonarqube` service container
+can be found, running, attached to exactly one docker network - the
+scanner joins that network instead of the host network, reaching
+SonarQube by its compose service name (`http://sonarqube:9000`) -
 a separate, in-container-only URL from the one used host-side (the
 compute-engine `curl` poll, further down the same script, and
 `fetch_findings.py`, both unchanged). `docker compose` prefixes its
@@ -91,11 +89,10 @@ stack for this script to join", not "something is wrong with it":
 - `sonar-host-url` is not the default - it is assumed to point somewhere
   other than this script's own ephemeral stack (which may not even be
   running under this `COMPOSE_FILE`), so the compose lookup isn't even
-  attempted. The given URL is passed through to the scanner unchanged, so
-  it must already be reachable from a container on docker's default
-  bridge network (a routable hostname/IP) - a bare `localhost`/`127.0.0.1`
-  value meaning "the host itself" resolves differently than it did under
-  `--network host`.
+  attempted. The given URL is passed through to the scanner unchanged,
+  reachable the same way it always was: the scanner container falls back
+  to the host network, so a `localhost`/`127.0.0.1` value meaning "the
+  host itself" still resolves correctly.
 - the default URL, but no compose `sonarqube` container at all under this
   `COMPOSE_FILE` - the common "reached SonarQube some other way" case.
 - the default URL, a caller-overridden compose project name (`-p`/

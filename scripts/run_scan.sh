@@ -313,7 +313,12 @@ scan_with_cli() {
   fi
   echo "Using scanner image: ${SCANNER_IMAGE}"
 
-  rm -rf "${ABS_PROJECT_BASE_DIR}/.scannerwork"
+  # No `rm -rf .../.scannerwork` here: the scanner can no longer create one
+  # under PROJECT_BASE_DIR at all (the mount below is `:ro`, and
+  # sonar.working.directory is pinned under SCANNER_CACHE_DIR instead), so
+  # there is nothing of this script's own making left to clean up there -
+  # and writing to the project tree, even just to delete a leftover
+  # directory, is exactly what the read-only mount means to avoid.
 
   # Keep the scanner container off the host network when this script's own
   # ephemeral stack (docker-compose.ephemeral.yml, via COMPOSE_FILE) can be
@@ -358,7 +363,16 @@ scan_with_cli() {
     # container): "no container at all" and "a container that exists but
     # isn't running" need to be told apart below - the first is this
     # script's own fallback case, the second is the fail-closed case.
-    mapfile -t sonarqube_containers < <(docker compose -f "$COMPOSE_FILE" ps -a -q sonarqube)
+    #
+    # Captured via `$(...)` with an explicit `||`, not piped straight into
+    # `mapfile < <(...)`: a process substitution's own exit status isn't
+    # checked there, so a failing `docker compose ps` (docker/compose
+    # itself broken) would otherwise look exactly like "ran fine, found
+    # nothing" and silently turn host networking back on instead of
+    # surfacing the broken lookup.
+    sonarqube_ps_output="$(docker compose -f "$COMPOSE_FILE" ps -a -q sonarqube)" \
+      || fail sonarqube-lookup-failed "Could not list the compose 'sonarqube' service container for ${COMPOSE_FILE} (docker compose ps failed; see the error above)."
+    mapfile -t sonarqube_containers <<< "$sonarqube_ps_output"
     # A real "no matching container" prints nothing at all (zero lines).
     # A single blank line (one empty-string element) means the same thing
     # in practice (no container id to act on) - fold it into the same
@@ -374,7 +388,13 @@ scan_with_cli() {
         # to the host network below, same as a non-default sonar-host-url.
         ;;
       1)
-        sonarqube_status="$(docker inspect -f '{{.State.Status}}' "${sonarqube_containers[0]}")"
+        # A failing `docker inspect` here (the container disappeared
+        # between `ps` and here, or docker itself is broken) is folded
+        # into the same reason as "found but not running" - either way,
+        # a failure-reason is always written rather than this script
+        # dying under `set -e` with no reason code at all.
+        sonarqube_status="$(docker inspect -f '{{.State.Status}}' "${sonarqube_containers[0]}")" \
+          || fail sonarqube-service-not-running "Could not inspect the compose 'sonarqube' service container for ${COMPOSE_FILE} (docker inspect failed; see the error above)."
         if [[ "$sonarqube_status" != "running" ]]; then
           fail sonarqube-service-not-running "The compose 'sonarqube' service container for ${COMPOSE_FILE} exists but is not running (status: ${sonarqube_status})."
         fi
