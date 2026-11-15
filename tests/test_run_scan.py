@@ -1373,6 +1373,124 @@ def test_dotnet_build_swapping_a_config_file_fails_with_invalid_sast_config(harn
     assert _output(harness, "unanalyzed-languages") is None
 
 
+# --- CHECKOUT_ROOT confinement -------------------------------------------
+#
+# A reusable-workflow caller checks out several directories as siblings
+# under one GITHUB_WORKSPACE (this action's own source, the fallback
+# baseline checkout, the caller's own code under `src`) - a bare workspace
+# check lets a symlink committed into the caller's checkout resolve to one
+# of those *other* siblings and still pass, because it still resolves
+# inside the workspace. CHECKOUT_ROOT, when set, narrows the confinement
+# boundary to the caller's own checkout root instead. Unset (the default
+# for every direct action user), behaviour is unchanged from the plain
+# GITHUB_WORKSPACE check above.
+
+
+def test_checkout_root_refuses_a_symlink_escaping_into_a_sibling_directory(ws_env):
+    checkout_root = ws_env["workspace"] / "src"
+    checkout_root.mkdir()
+    sibling = ws_env["workspace"] / ".sast-sonarqube"
+    sibling.mkdir()
+    (checkout_root / "app").symlink_to(sibling, target_is_directory=True)
+    proc = _ws_run(
+        ws_env, "src/app", ws_env["workspace"], extra_env={"CHECKOUT_ROOT": str(checkout_root)}
+    )
+    assert proc.returncode != 0
+    assert "outside CHECKOUT_ROOT" in proc.stderr
+    assert _ws_output(ws_env, "failure-reason") == "project-base-dir-outside-checkout"
+    assert _ws_docker_calls(ws_env) == []
+
+
+def test_checkout_root_allows_a_normal_subdirectory(ws_env):
+    checkout_root = ws_env["workspace"] / "src"
+    checkout_root.mkdir()
+    project = checkout_root / "app"
+    project.mkdir()
+    proc = _ws_run(
+        ws_env, "src/app", ws_env["workspace"], extra_env={"CHECKOUT_ROOT": str(checkout_root)}
+    )
+    run_calls = _ws_docker_run_calls(ws_env)
+    assert len(run_calls) == 1, proc.stderr
+    assert f"-v {project.resolve()}:/usr/src:ro " in run_calls[0]
+
+
+def test_checkout_root_allows_dot(ws_env):
+    checkout_root = ws_env["workspace"] / "src"
+    checkout_root.mkdir()
+    proc = _ws_run(
+        ws_env, ".", str(checkout_root), extra_env={"CHECKOUT_ROOT": str(checkout_root)}
+    )
+    run_calls = _ws_docker_run_calls(ws_env)
+    assert len(run_calls) == 1, proc.stderr
+    assert f"-v {checkout_root.resolve()}:/usr/src:ro " in run_calls[0]
+
+
+def test_without_checkout_root_behaviour_is_unchanged(ws_env):
+    # CHECKOUT_ROOT unset (the default, as every other test in this module
+    # already exercises) - confinement still checks against
+    # GITHUB_WORKSPACE, exactly as it did before this input existed. Pinned
+    # again here, explicitly, next to the CHECKOUT_ROOT tests above.
+    outside = ws_env["tmp"] / "outside"
+    outside.mkdir()
+    (ws_env["workspace"] / "app").symlink_to(outside, target_is_directory=True)
+    proc = _ws_run(ws_env, "app", ws_env["workspace"])
+    assert proc.returncode != 0
+    assert "outside GITHUB_WORKSPACE" in proc.stderr
+    assert _ws_output(ws_env, "failure-reason") == "project-base-dir-outside-workspace"
+    assert _ws_docker_calls(ws_env) == []
+
+
+def test_checkout_root_inaccessible_fails_closed(ws_env):
+    project = ws_env["workspace"] / "app"
+    project.mkdir()
+    proc = _ws_run(
+        ws_env, "app", ws_env["workspace"],
+        extra_env={"CHECKOUT_ROOT": str(ws_env["tmp"] / "nonexistent-checkout-root")},
+    )
+    assert proc.returncode != 0
+    assert _ws_output(ws_env, "failure-reason") == "checkout-root-inaccessible"
+    assert _ws_docker_calls(ws_env) == []
+
+
+def test_dotnet_refuses_project_base_dir_outside_checkout_root(harness):
+    # Same confinement, applied before the cli/dotnet split - dotnet mode's
+    # begin/build-command/end all run from PROJECT_BASE_DIR, so this must
+    # be refused before any of them start.
+    checkout_root = harness.tmp_path / "checkout-root"
+    checkout_root.mkdir()
+    outside = harness.tmp_path / "outside"
+    outside.mkdir()
+    (checkout_root / "app").symlink_to(outside, target_is_directory=True)
+    result = _dotnet(
+        harness,
+        CHECKOUT_ROOT=str(checkout_root),
+        PROJECT_BASE_DIR=str(checkout_root / "app"),
+        SAST_CONFIG_FILE=str(checkout_root / "app" / ".sastrc"),
+        SAST_IGNORE_FILE=str(checkout_root / "app" / ".sastignore"),
+    )
+    assert result.returncode != 0
+    assert _output(harness, "failure-reason") == "project-base-dir-outside-checkout"
+    assert harness.args("dotnet-tool.args") is None
+    assert harness.args("scanner-begin.args") is None
+
+
+def test_dotnet_checkout_root_allows_a_normal_subdirectory(harness):
+    checkout_root = harness.tmp_path / "checkout-root"
+    checkout_root.mkdir()
+    project = checkout_root / "app"
+    project.mkdir()
+    (project / "Program.cs").write_text("class P {}\n")
+    result = _dotnet(
+        harness,
+        CHECKOUT_ROOT=str(checkout_root),
+        PROJECT_BASE_DIR=str(project),
+        SAST_CONFIG_FILE=str(project / ".sastrc"),
+        SAST_IGNORE_FILE=str(project / ".sastignore"),
+    )
+    assert result.returncode == 0, result.stderr
+    assert (harness.log_dir / "scanner-begin.cwd").read_text().strip() == str(project)
+
+
 def test_action_documents_every_failure_reason_run_scan_can_set():
     import yaml
 

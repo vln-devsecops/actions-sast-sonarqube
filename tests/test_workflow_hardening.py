@@ -304,6 +304,33 @@ def test_sibling_dirs_not_under_scanned_project_base_dir(workflow):
 
 
 @pytest.mark.parametrize("workflow", WORKFLOWS)
+def test_every_scan_step_passes_a_checkout_root_matching_its_checkout_path(workflow):
+    """run_scan.sh confines `project-base-dir` to `checkout-root` (when
+    set) instead of the whole workspace - a symlink committed into one
+    sibling checkout (e.g. `src`) can otherwise resolve into another (this
+    action's own source, or the fallback baseline checkout) and still pass
+    a bare workspace check. Every step that invokes the scanner must pass
+    `checkout-root` as the literal sibling directory its own
+    `project-base-dir` value is rooted under - `src` for the PR head and
+    baseline scans, `.baseline-checkout` for the fallback baseline scan."""
+    checked = 0
+    for job_name, step in _scan_steps(workflow):
+        with_block = step.get("with") or {}
+        value = str(with_block.get("project-base-dir", ""))
+        prefix_dir = value.split("${{", 1)[0].rstrip("/")
+        checked += 1
+        assert prefix_dir, (
+            f"{workflow}:{job_name}: scan step's project-base-dir {value!r} has no "
+            "literal checkout-root prefix before the caller's own input"
+        )
+        assert with_block.get("checkout-root") == prefix_dir, (
+            f"{workflow}:{job_name}: checkout-root {with_block.get('checkout-root')!r} does not "
+            f"match the checkout path prefix {prefix_dir!r} in project-base-dir {value!r}"
+        )
+    assert checked > 0, f"{workflow}: expected at least one step invoking the scanner"
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS)
 def test_checkouts_into_fixed_path_are_preceded_by_removal(workflow):
     checked = 0
     for job_name, steps in _steps(workflow):
