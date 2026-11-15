@@ -35,6 +35,13 @@ FAKE_DOCKER = r"""#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == "compose" ]]; then
   if [[ "$*" == *"ps -a -q sonarqube"* ]]; then
+    # FAKE_SONARQUBE_PS_FAILS: the compose `ps` lookup itself fails
+    # (e.g. docker/compose broken), as opposed to succeeding with no
+    # matching container.
+    if [[ -n "${FAKE_SONARQUBE_PS_FAILS:-}" ]]; then
+      echo "fake docker compose ps failure" >&2
+      exit 1
+    fi
     # FAKE_SONARQUBE_PS_OUTPUT unset/empty (the default): no matching
     # compose container at all - this harness has no real compose stack,
     # so the scanner falls back to the host network. A test that wants the
@@ -50,6 +57,10 @@ if [[ "$1" == "compose" ]]; then
   exit 0
 fi
 if [[ "$1" == "inspect" ]]; then
+  if [[ -n "${FAKE_SONARQUBE_INSPECT_FAILS:-}" ]]; then
+    echo "fake docker inspect failure" >&2
+    exit 1
+  fi
   if [[ "$*" == *".State.Status"* ]]; then
     echo "${FAKE_SONARQUBE_STATUS:-running}"
     exit 0
@@ -420,12 +431,24 @@ def test_cli_non_default_sonar_host_url_falls_back_with_a_warning(harness):
         ({"FAKE_SONARQUBE_PS_OUTPUT": "fake-container-id", "FAKE_SONARQUBE_STATUS": "restarting"}, "sonarqube-service-not-running"),
         ({"FAKE_SONARQUBE_PS_OUTPUT": "fake-container-id", "FAKE_SONAR_NETWORKS": "net-one net-two"}, "sonarqube-network-ambiguous"),
         ({"FAKE_SONARQUBE_PS_OUTPUT": "fake-container-id-1\nfake-container-id-2"}, "sonarqube-service-ambiguous"),
+        ({"FAKE_SONARQUBE_PS_FAILS": "1"}, "sonarqube-lookup-failed"),
+        ({"FAKE_SONARQUBE_PS_OUTPUT": "fake-container-id", "FAKE_SONARQUBE_INSPECT_FAILS": "1"}, "sonarqube-service-not-running"),
     ],
 )
 def test_cli_sonarqube_lookup_errors_fail_closed_with_a_reason(harness, overrides, reason):
     result = harness.run(**overrides)
     assert result.returncode != 0
     assert _output(harness, "failure-reason") == reason
+    assert harness.args("docker-run.args") is None
+
+
+def test_cli_sonarqube_ps_failure_does_not_silently_fall_back(harness):
+    """A failing `docker compose ps` must not look like "no container
+    found" - that would silently turn host networking back on instead of
+    surfacing the broken lookup."""
+    result = harness.run(FAKE_SONARQUBE_PS_FAILS="1")
+    assert result.returncode != 0
+    assert "::warning::" not in result.stdout
     assert harness.args("docker-run.args") is None
 
 

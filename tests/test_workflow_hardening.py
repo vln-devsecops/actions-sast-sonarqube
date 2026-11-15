@@ -553,3 +553,53 @@ def test_scanning_src_dot_dot_is_caught():
     value = "src/../${{ inputs.project-base-dir }}"
     prefix_dir = value.split("${{", 1)[0].rstrip("/")
     assert any(_lies_under(sibling, prefix_dir) for sibling in SIBLING_DIRS)
+
+
+# --- compose project name (run_scan.sh's network/URL lookup relies on it) -----
+
+
+def _compose_up_steps(workflow):
+    """Every step whose `run:` starts the ephemeral stack (`docker compose
+    ... up`)."""
+    for job_name, steps in _steps(workflow):
+        for step in steps:
+            script = step.get("run") or ""
+            if re.search(r"\bdocker compose\b.*\bup\b", script):
+                yield job_name, step, steps
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS)
+def test_compose_up_does_not_override_the_project_name(workflow):
+    """run_scan.sh's own scanner-network lookup (see docs/design.md)
+    resolves the compose project name the same way `docker compose`
+    always does by default: from its own environment, or else
+    docker-compose.ephemeral.yml's fixed top-level `name:`. A `-p` flag
+    or COMPOSE_PROJECT_NAME set only for the step that runs `docker
+    compose ... up` (not exported for run_scan.sh's own step too) would
+    silently push the normal "join the compose network" path onto the
+    deprecated host-network fallback instead, with no error - the lookup
+    would simply resolve a different project name and find nothing."""
+    data = yaml.safe_load((WORKFLOWS_DIR / workflow).read_text())
+    workflow_env = data.get("env") or {}
+    assert "COMPOSE_PROJECT_NAME" not in workflow_env, (
+        f"{workflow}: workflow-level env sets COMPOSE_PROJECT_NAME"
+    )
+    checked = 0
+    for job_name, job in data["jobs"].items():
+        job_env = job.get("env") or {}
+        assert "COMPOSE_PROJECT_NAME" not in job_env, (
+            f"{workflow}:{job_name}: job-level env sets COMPOSE_PROJECT_NAME"
+        )
+        for job_name_inner, step, _steps_list in _compose_up_steps(workflow):
+            if job_name_inner != job_name:
+                continue
+            checked += 1
+            script = step["run"]
+            assert not re.search(r"(^|\s)-p(\s|$)", script), (
+                f"{workflow}:{job_name}: {step.get('name')!r} passes -p to `docker compose up`"
+            )
+            step_env = step.get("env") or {}
+            assert "COMPOSE_PROJECT_NAME" not in step_env, (
+                f"{workflow}:{job_name}: {step.get('name')!r} sets COMPOSE_PROJECT_NAME"
+            )
+    assert checked > 0, f"{workflow}: expected a `docker compose ... up` step"
