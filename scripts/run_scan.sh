@@ -251,8 +251,22 @@ scan_with_dotnet() {
     if [[ -n "$dotnet_cmd" ]]; then
       # readlink -f: resolve through a symlinked `dotnet` (e.g. from
       # update-alternatives or a version manager) to its physical install
-      # directory, not the symlink's own directory.
-      DOTNET_ROOT_ENV_ARGS=(DOTNET_ROOT="$(dirname "$(readlink -f "$dotnet_cmd")")")
+      # directory, not the symlink's own directory. That directory is only
+      # trusted as a real .NET root when it contains host/fxr (present in
+      # every real install, alongside the runtime/SDK dirs) - without this
+      # check, a launcher shim whose `dotnet` is itself a symlink to an
+      # unrelated binary (e.g. Snap's /snap/bin/dotnet -> .../usr/bin/snap)
+      # would resolve to a directory that is NOT a .NET root, and deriving
+      # DOTNET_ROOT from it would override a setup that works today via
+      # the registered install location or the OS default - breaking it
+      # instead of leaving it alone.
+      local dotnet_candidate_root
+      dotnet_candidate_root="$(dirname "$(readlink -f "$dotnet_cmd")")"
+      if [[ -d "${dotnet_candidate_root}/host/fxr" ]]; then
+        DOTNET_ROOT_ENV_ARGS=(DOTNET_ROOT="$dotnet_candidate_root")
+      fi
+      # else: doesn't look like a .NET root - leave DOTNET_ROOT_ENV_ARGS
+      # empty, same as "dotnet isn't on PATH" below.
     fi
     # else: dotnet isn't on PATH at all - leave DOTNET_ROOT_ENV_ARGS empty
     # and fall through unchanged; the `dotnet tool install` below fails the
