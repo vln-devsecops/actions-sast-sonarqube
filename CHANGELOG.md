@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.2](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.3.1...v1.3.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* **workflows:** allocate a per-run compose project name and host port ([#69](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/69)) ([6d286a1](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/6d286a1a2fb3f0366fdcf9fb13dc809e5f38185d))
+
 ## [1.3.1](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.3.0...v1.3.1) (2026-11-15)
 
 
