@@ -37,7 +37,9 @@ services:
       SONAR_JDBC_USERNAME: sonar
       SONAR_JDBC_PASSWORD: sonar
     ports:
-      - "9000:9000"
+      # SONAR_HOST_PORT is allocated per run by the calling workflow so that
+      # concurrent jobs sharing one docker daemon do not collide on 9000.
+      - "${SONAR_HOST_PORT:-9000}:9000"
     networks:
       - sonar-ephemeral
     # The bundled Elasticsearch refuses to start unless the process can open

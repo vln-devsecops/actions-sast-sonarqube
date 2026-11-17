@@ -410,6 +410,32 @@ def test_cli_joins_compose_network_when_sonarqube_container_is_found(harness):
     assert "::warning::" not in result.stdout
 
 
+def test_cli_joins_compose_network_when_host_url_uses_the_allocated_port(harness):
+    # Per-run stacks publish SonarQube on SONAR_HOST_PORT; the scanner must
+    # still join the compose network (not fall back to host networking).
+    result = harness.run(
+        SONAR_HOST_PORT="45123",
+        SONAR_HOST_URL="http://localhost:45123",
+        FAKE_SONARQUBE_PS_OUTPUT="fake-container-id",
+        FAKE_SONAR_NETWORKS="fake-network",
+    )
+    assert result.returncode == 0, result.stderr
+    assert _normalize_cache_mount(harness.args("docker-run.args")) == _expected_cli_args(
+        harness, network=("--network", "fake-network"), container_host_url="http://sonarqube:9000"
+    )
+    assert "::warning::" not in result.stdout
+
+
+def test_cli_default_port_url_is_not_the_stack_url_when_a_different_port_is_allocated(harness):
+    result = harness.run(
+        SONAR_HOST_PORT="45123",
+        FAKE_SONARQUBE_PS_OUTPUT="fake-container-id",
+        FAKE_SONAR_NETWORKS="fake-network",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "::warning::" in result.stdout and "deprecated" in result.stdout
+
+
 def test_cli_non_default_sonar_host_url_falls_back_with_a_warning(harness):
     custom = "http://127.0.0.1:9000"
     # A compose container IS "found" here (FAKE_SONARQUBE_PS_OUTPUT set),

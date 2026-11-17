@@ -450,7 +450,7 @@ scan_with_cli() {
   # SONAR_HOST_URL is also used host-side, unchanged, further below (the
   # compute-engine `curl` poll) - SCANNER_SONAR_HOST_URL is a separate,
   # in-container-only value that may differ from it.
-  DEFAULT_SONAR_HOST_URL="http://localhost:9000"
+  DEFAULT_SONAR_HOST_URL="http://localhost:${SONAR_HOST_PORT:-9000}"
   SCANNER_SONAR_HOST_URL="$SONAR_HOST_URL"
   SCANNER_NETWORK_ARGS=(--network host)
   USE_HOST_NETWORK=true
