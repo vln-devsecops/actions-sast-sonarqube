@@ -110,6 +110,7 @@ jobs:
         id: tiny
         uses: ./
         with:
+          sonar-host-url: http://localhost:${{ env.SONAR_HOST_PORT }}
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: dotnet-tiny
           project-base-dir: fixtures-dotnet/tiny
@@ -145,6 +146,7 @@ jobs:
         continue-on-error: true
         uses: ./
         with:
+          sonar-host-url: http://localhost:${{ env.SONAR_HOST_PORT }}
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: dotnet-broken-build
           project-base-dir: fixtures-dotnet/broken-build
@@ -157,6 +159,7 @@ jobs:
         continue-on-error: true
         uses: ./
         with:
+          sonar-host-url: http://localhost:${{ env.SONAR_HOST_PORT }}
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: dotnet-partial-build
           project-base-dir: fixtures-dotnet/partial-build
@@ -172,6 +175,7 @@ jobs:
         continue-on-error: true
         uses: ./
         with:
+          sonar-host-url: http://localhost:${{ env.SONAR_HOST_PORT }}
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: dotnet-no-csharp
           project-base-dir: fixtures-dotnet/no-csharp
@@ -184,6 +188,7 @@ jobs:
         continue-on-error: true
         uses: ./
         with:
+          sonar-host-url: http://localhost:${{ env.SONAR_HOST_PORT }}
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: dotnet-duplicate-guid
           project-base-dir: fixtures-dotnet/duplicate-guid
@@ -196,6 +201,7 @@ jobs:
         continue-on-error: true
         uses: ./
         with:
+          sonar-host-url: http://localhost:${{ env.SONAR_HOST_PORT }}
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: dotnet-no-build-command
           project-base-dir: fixtures-dotnet/tiny
@@ -229,6 +235,7 @@ jobs:
         id: excluded_project
         uses: ./
         with:
+          sonar-host-url: http://localhost:${{ env.SONAR_HOST_PORT }}
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: dotnet-excluded-project
           project-base-dir: fixtures-dotnet/excluded-project
@@ -240,6 +247,7 @@ jobs:
         id: stray_csharp
         uses: ./
         with:
+          sonar-host-url: http://localhost:${{ env.SONAR_HOST_PORT }}
           sonar-token: ${{ steps.bootstrap.outputs.token }}
           project-key: dotnet-stray-csharp
           project-base-dir: fixtures-dotnet/stray-csharp

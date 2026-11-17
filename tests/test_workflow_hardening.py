@@ -694,3 +694,19 @@ def test_no_workflow_step_hardcodes_the_default_sonarqube_port(workflow):
 def test_compose_publishes_the_allocated_host_port():
     compose = yaml.safe_load((WORKFLOWS_DIR.parent.parent / "docker-compose.ephemeral.yml").read_text())
     assert compose["services"]["sonarqube"]["ports"] == ["${SONAR_HOST_PORT:-9000}:9000"]
+
+
+def test_ci_e2e_scan_steps_pass_the_allocated_port_as_sonar_host_url():
+    """ci.yml's own e2e scans run the action under test (`uses: ./`); left to
+    the action's default URL they would hit port 9000 instead of the port the
+    per-run stack was published on."""
+    data = yaml.safe_load((WORKFLOWS_DIR / "ci.yml").read_text())
+    checked = 0
+    for job_name, job in data["jobs"].items():
+        for step in job.get("steps") or []:
+            if step.get("uses") != "./":
+                continue
+            checked += 1
+            url = (step.get("with") or {}).get("sonar-host-url", "")
+            assert "SONAR_HOST_PORT" in url, f"ci.yml:{job_name}: {step.get('name')!r} must pass sonar-host-url"
+    assert checked > 0
