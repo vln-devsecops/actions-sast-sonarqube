@@ -80,16 +80,29 @@ jobs:
       - name: Raise vm.max_map_count for Elasticsearch
         run: sudo sysctl -w vm.max_map_count=262144
 
+      - name: Allocate per-run SonarQube stack name and port
+        # One docker daemon is shared by every runner on a self-hosted host, so
+        # a fixed compose project name and host port make concurrent jobs
+        # collide (one job's `down -v` removes another's stack; both bind
+        # 9000). Exported via GITHUB_ENV so every later step - including
+        # run_scan.sh's network lookup - resolves the same project.
+        run: |
+          set -euo pipefail
+          project="$(printf '%s' "sonar-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-')"
+          port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+          echo "COMPOSE_PROJECT_NAME=${project}" >> "$GITHUB_ENV"
+          echo "SONAR_HOST_PORT=${port}" >> "$GITHUB_ENV"
+
       - name: Start ephemeral SonarQube stack
         run: docker compose -f docker-compose.ephemeral.yml up -d
 
       - name: Wait for SonarQube to be ready
-        run: ./scripts/wait_for_sonarqube.sh http://localhost:9000
+        run: ./scripts/wait_for_sonarqube.sh http://localhost:${SONAR_HOST_PORT}
 
       - name: Bootstrap admin token
         id: bootstrap
         run: |
-          token="$(./scripts/bootstrap_sonarqube.sh http://localhost:9000 gha-dotnet-e2e)"
+          token="$(./scripts/bootstrap_sonarqube.sh http://localhost:${SONAR_HOST_PORT} gha-dotnet-e2e)"
           echo "::add-mask::${token}"
           echo "token=${token}" >> "$GITHUB_OUTPUT"
 

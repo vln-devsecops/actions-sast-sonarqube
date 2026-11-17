@@ -51,6 +51,8 @@ SIBLING_DIRS = {".sast-sonarqube", ".baseline-checkout"}
 ALLOWED_EXACT_TARGETS = {
     "$GITHUB_OUTPUT",
     "${GITHUB_OUTPUT}",
+    "$GITHUB_ENV",
+    "${GITHUB_ENV}",
     "$GITHUB_STEP_SUMMARY",
     "${GITHUB_STEP_SUMMARY}",
     "/dev/null",
@@ -643,38 +645,52 @@ def _compose_up_steps(workflow):
                 yield job_name, step, steps
 
 
+def _writes_to_github_env(script, name):
+    return bool(re.search(rf"{name}=.*>>\s*\"?\$GITHUB_ENV", script))
+
+
 @pytest.mark.parametrize("workflow", WORKFLOWS)
-def test_compose_up_does_not_override_the_project_name(workflow):
-    """run_scan.sh's own scanner-network lookup (see docs/design.md)
-    resolves the compose project name the same way `docker compose`
-    always does by default: from its own environment, or else
-    docker-compose.ephemeral.yml's fixed top-level `name:`. A `-p` flag
-    or COMPOSE_PROJECT_NAME set only for the step that runs `docker
-    compose ... up` (not exported for run_scan.sh's own step too) would
-    silently push the normal "join the compose network" path onto the
-    deprecated host-network fallback instead, with no error - the lookup
-    would simply resolve a different project name and find nothing."""
+def test_compose_project_name_and_port_are_per_run_and_exported_job_wide(workflow):
+    """Every job shares one docker daemon with the other runners on its host,
+    so a fixed compose project name and host port collide across concurrent
+    jobs (one job's `down -v` removes another's stack, and both bind 9000).
+    The project name and host port are therefore allocated per run by a step
+    that exports them via $GITHUB_ENV *before* `docker compose up`, so every
+    later step - including run_scan.sh's own network lookup - resolves the
+    same project name. They are never set via `-p` or job/step `env:` (those
+    would reach only some steps and silently push run_scan.sh onto the
+    deprecated host-network fallback)."""
     data = yaml.safe_load((WORKFLOWS_DIR / workflow).read_text())
-    workflow_env = data.get("env") or {}
-    assert "COMPOSE_PROJECT_NAME" not in workflow_env, (
-        f"{workflow}: workflow-level env sets COMPOSE_PROJECT_NAME"
-    )
+    assert "COMPOSE_PROJECT_NAME" not in (data.get("env") or {})
     checked = 0
     for job_name, job in data["jobs"].items():
-        job_env = job.get("env") or {}
-        assert "COMPOSE_PROJECT_NAME" not in job_env, (
-            f"{workflow}:{job_name}: job-level env sets COMPOSE_PROJECT_NAME"
-        )
-        for job_name_inner, step, _steps_list in _compose_up_steps(workflow):
-            if job_name_inner != job_name:
+        assert "COMPOSE_PROJECT_NAME" not in (job.get("env") or {})
+        steps = job.get("steps") or []
+        for idx, step in enumerate(steps):
+            script = step.get("run") or ""
+            if not re.search(r"\bdocker compose\b.*\bup\b", script):
                 continue
             checked += 1
-            script = step["run"]
-            assert not re.search(r"(^|\s)-p(\s|$)", script), (
-                f"{workflow}:{job_name}: {step.get('name')!r} passes -p to `docker compose up`"
-            )
-            step_env = step.get("env") or {}
-            assert "COMPOSE_PROJECT_NAME" not in step_env, (
-                f"{workflow}:{job_name}: {step.get('name')!r} sets COMPOSE_PROJECT_NAME"
-            )
+            assert not re.search(r"(^|\s)-p(\s|$)", script)
+            assert "COMPOSE_PROJECT_NAME" not in (step.get("env") or {})
+            alloc = [
+                st for st in steps[:idx]
+                if _writes_to_github_env(st.get("run") or "", "COMPOSE_PROJECT_NAME")
+                and _writes_to_github_env(st.get("run") or "", "SONAR_HOST_PORT")
+            ]
+            assert alloc, f"{workflow}:{job_name}: no step before `up` exports COMPOSE_PROJECT_NAME and SONAR_HOST_PORT"
+            body = alloc[0]["run"]
+            for needed in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB"):
+                assert needed in body, f"{workflow}:{job_name}: project name must include {needed}"
     assert checked > 0, f"{workflow}: expected a `docker compose ... up` step"
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS)
+def test_no_workflow_step_hardcodes_the_default_sonarqube_port(workflow):
+    text = (WORKFLOWS_DIR / workflow).read_text()
+    assert "localhost:9000" not in text, f"{workflow}: use the allocated SONAR_HOST_PORT"
+
+
+def test_compose_publishes_the_allocated_host_port():
+    compose = yaml.safe_load((WORKFLOWS_DIR.parent.parent / "docker-compose.ephemeral.yml").read_text())
+    assert compose["services"]["sonarqube"]["ports"] == ["${SONAR_HOST_PORT:-9000}:9000"]

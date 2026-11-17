@@ -111,6 +111,16 @@ stack for this script to join", not "something is wrong with it":
   `COMPOSE_PROJECT_NAME` into the step itself (not only the `up` command)
   to make the lookup follow the override correctly instead.
 
+The reusable workflows do exactly that. Because one docker daemon is often
+shared by many self-hosted runners, a fixed project name and host port 9000
+would make concurrent jobs collide, so each job allocates a per-run
+`COMPOSE_PROJECT_NAME` (`sonar-<run id>-<attempt>-<job>`) and a free host
+port (`SONAR_HOST_PORT`) in a step that writes both to `$GITHUB_ENV` before
+`docker compose up`, which makes them visible to every later step.
+`docker-compose.ephemeral.yml` publishes `${SONAR_HOST_PORT:-9000}:9000`, and
+`run_scan.sh` treats `http://localhost:${SONAR_HOST_PORT:-9000}` as the
+"default" URL for the network lookup above.
+
 A *lookup error* - the compose `sonarqube` container IS found but isn't
 running (stopped, restarting), or is attached to other than exactly one
 docker network, or more than one container matches the service - fails
