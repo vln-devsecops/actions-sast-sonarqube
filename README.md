@@ -527,6 +527,23 @@ mapped onto the same severity scale issues use (`HIGH`→`CRITICAL`,
 `MEDIUM`→`MAJOR`, `LOW`→`MINOR`, a judgment call with no canonical mapping
 to fall back on) so the same threshold applies to both.
 
+## Skipping scans on PRs that change no code
+
+`sonar-pr.yml` starts with a `changes` job on a hosted `ubuntu-latest` runner
+(whatever `runner-type` is) that lists the PR's changed files. When every one
+matches the `skip-paths` input (documentation, images, licence text,
+lockfiles and `.github/` by default), the `pr-scan` job is skipped: it never
+occupies the caller's runner or starts SonarQube, and no
+`sonarqube-community/new-findings` check or PR comment is posted. One file
+that matches nothing on the list means a full scan. Events other than
+`pull_request`, an empty `skip-paths`, or any failure to list the files all
+scan. Callers need no change; pass `skip-paths` (newline-separated globs, `*`
+also matches `/`) only to replace the default list.
+
+Because the skipped job posts no check, don't make the scan check a
+**required** status check on a branch unless a skipped `pr-scan` is
+acceptable there (a skipped required job counts as passing).
+
 ## Using this action from another repo
 
 Both reusable workflows live in this repo and are meant to be called from a

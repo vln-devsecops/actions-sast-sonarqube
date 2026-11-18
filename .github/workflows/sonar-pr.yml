@@ -64,6 +64,46 @@ on:
           scanner read blame data instead.
         type: boolean
         default: false
+      skip-paths:
+        description: >-
+          Newline-separated shell glob patterns (matched against each changed
+          file's full path, where `*` also matches `/`). A pull request whose
+          changed files ALL match one of these skips the scan entirely: the
+          `pr-scan` job is skipped, so it never occupies the caller's runner
+          or starts SonarQube. Any changed file that matches none of them
+          means "scan". Events other than pull_request always scan, and so
+          does any failure to list the PR's files. The default covers
+          documentation, images, licence text, lockfiles and `.github/`
+          (workflows and Dependabot config, which the community scanner
+          doesn't analyse). Set it to an empty string to scan every PR.
+        type: string
+        default: |-
+          *.md
+          *.markdown
+          *.txt
+          *.rst
+          *.adoc
+          docs/*
+          LICENSE*
+          NOTICE*
+          CODEOWNERS
+          .github/*
+          .gitignore
+          .gitattributes
+          .editorconfig
+          *.png
+          *.jpg
+          *.jpeg
+          *.gif
+          *.svg
+          *.ico
+          *.lock
+          package-lock.json
+          */package-lock.json
+          pnpm-lock.yaml
+          */pnpm-lock.yaml
+          go.sum
+          */go.sum
       runner-type:
         description: >-
           Value for runs-on. Defaults to ubuntu-latest. Reusable-workflow
@@ -195,7 +235,52 @@ on:
         required: false
 
 jobs:
+  changes:
+    # Runs on a hosted runner, whatever runner-type is: deciding whether to
+    # scan must not itself queue on the (possibly single-slot) runner the
+    # scan needs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      scan: ${{ steps.decide.outputs.scan }}
+    steps:
+      - name: Decide whether the PR changes anything worth scanning
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          SKIP_PATHS: ${{ inputs.skip-paths }}
+        run: |
+          set -uo pipefail
+          # Every uncertain path scans: only a successful listing in which
+          # every file matches a skip pattern may skip the scan.
+          scan() { echo "scan=$1" >> "$GITHUB_OUTPUT"; echo "scan=$1 ($2)"; exit 0; }
+          [ "${EVENT_NAME}" = "pull_request" ] || scan true "event ${EVENT_NAME}"
+          [ -n "${SKIP_PATHS}" ] || scan true "no skip-paths"
+          files=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)') \
+            || scan true "could not list the PR's files"
+          [ -n "${files}" ] || scan true "no files listed"
+          patterns=()
+          while IFS= read -r p; do [ -n "$p" ] && patterns+=("$p"); done <<< "${SKIP_PATHS}"
+          while IFS= read -r f; do
+            skipped=false
+            for p in "${patterns[@]}"; do
+              # shellcheck disable=SC2254
+              case "$f" in $p) skipped=true; break ;; esac
+            done
+            [ "$skipped" = true ] || scan true "$f is not on the skip list"
+          done <<< "${files}"
+          scan false "every changed file is on the skip list"
+
   pr-scan:
+    needs: changes
+    if: needs.changes.outputs.scan == 'true'
     runs-on: ${{ inputs.runner-type }}
     # Every long step below has its own deadline (wait_for_sonarqube.sh 300s,
     # run_scan.sh 600s), but image pulls and `docker compose up` don't - so
