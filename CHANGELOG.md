@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.3.2...v1.4.0) (2026-11-19)
+
+
+### Features
+
+* **workflows:** skip the PR scan when no code changed ([#71](https://github.com/vln-devsecops/actions-sast-sonarqube/issues/71)) ([0315eaa](https://github.com/vln-devsecops/actions-sast-sonarqube/commit/0315eaaa103527794de5f657294423f7f7d39f78))
+
 ## [1.3.2](https://github.com/vln-devsecops/actions-sast-sonarqube/compare/v1.3.1...v1.3.2) (2026-11-17)
 
 
