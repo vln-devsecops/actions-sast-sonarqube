@@ -208,6 +208,8 @@ def test_caller_code_is_checked_out_into_src(workflow):
     exists: exactly one checkout of the caller's own repository (no
     `repository:` override) targets `src`."""
     for job_name, steps in _steps(workflow):
+        if not _checkout_steps(steps):
+            continue  # e.g. the hosted-runner `changes` job: it checks nothing out
         caller = [
             s
             for s in _checkout_steps(steps)
@@ -269,6 +271,8 @@ def test_pr_head_checkout_uses_the_resolved_sha_into_src():
 def test_action_source_is_checked_out_once_before_any_use():
     for workflow in WORKFLOWS:
         for job_name, steps in _steps(workflow):
+            if not _checkout_steps(steps):
+                continue  # e.g. the hosted-runner `changes` job: it checks nothing out
             action_checkouts = [
                 i
                 for i, s in enumerate(steps)
@@ -586,6 +590,8 @@ def _action_source_violations(steps):
 @pytest.mark.parametrize("workflow", WORKFLOWS)
 def test_nothing_after_the_action_source_checkout_modifies_it(workflow):
     for job_name, steps in _steps(workflow):
+        if not _checkout_steps(steps):
+            continue  # e.g. the hosted-runner `changes` job: it checks nothing out
         assert _action_source_violations(steps) == [], f"{workflow}:{job_name}"
 
 
